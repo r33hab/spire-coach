@@ -69,7 +69,8 @@ Every decision comes from a local simulator, tree search, and models trained on 
   - Stunned-enemy reporting and card-grid selection fixes (WhoNeedsRAMAnyways/STS2MCP-fork).
   - Any v0.111 fixes not already present (upstream PR #132, timothyhioe/STS2MCP).
 - **Our additions:**
-  - Per enemy: the current move id and move history, read from the monster's move state (the mod already reads `monster.NextMove`).
+  - Per enemy: the current move id and the AI's internal state (move history, counters, flags), read by reflection from the live monster. The mod already reads `monster.NextMove`. Which fields matter is decided per monster type from the decompiled AI code.
+  - Any other visible field the snapshot needs that the base forks don't report, such as relic counters. The round-trip gate (section 6.5) is what finds these.
   - A recent player-action log: card `uid`, target, potion slot, in-combat selections and end turn, captured from the game's own play path.
   - A shared-secret token required on every HTTP request. Upstream PR #87 adds one, but bundles it with about 2,000 lines of unrelated changes, so we write a small check instead of cherry-picking it.
 - **Hidden-information fields.** Some fields reveal what the player cannot see: true pile order, RNG state, card and potion pools, upcoming encounters. They are used only by tests and capture tools, never by the coach (section 6.2).
@@ -87,7 +88,7 @@ Every decision comes from a local simulator, tree search, and models trained on 
 
 ### 5.3 Coach service: new repo `spire-coach`
 
-Python 3.13, managed with uv. FastAPI and uvicorn serve HTTP and WebSocket; pywebview hosts the floating window.
+Python 3.13, managed with uv. FastAPI and uvicorn serve HTTP and WebSocket; pywebview hosts the floating window. The simulator's Python package (`src/sts2_gym`) is a local path dependency, and it loads the native library built from our fork.
 
 | Module | Responsibility |
 |---|---|
@@ -98,7 +99,7 @@ Python 3.13, managed with uv. FastAPI and uvicorn serve HTTP and WebSocket; pywe
 | `fidelity` | After each move, compares the simulator's predicted outcome with the game's and writes gap reports. |
 | `autopilot` | Modes off, combat only, and full Act 1. Executes moves through the mod with `wait=true` and enforces stop conditions. |
 | `rules` | Stage-1 rules for non-combat screens: card reward, map, shop, rest, event, treasure. |
-| `runlog` | One JSONL file per run holding states, recommendations, moves and grades. |
+| `runlog` | One JSONL file per run holding states, recommendations, moves and grades. It can also run on its own as a log-only **capture mode**, collecting real positions for the gates before the engine exists. |
 | `review` | Builds the post-run review and re-analyzes positions in the background at 10× the live budget. |
 | `server` | Serves the panel and review pages and pushes updates over WebSocket. |
 
@@ -121,7 +122,7 @@ At each decision point the coach builds a new simulator position from the settle
 
 - **Player:** HP, max HP, block, energy, powers with exact stacks, relics with counters, potions.
 - **Piles:** hand (in order), draw pile (as a multiset), discard pile and exhaust pile. Each card carries its id, upgrade and enchantments.
-- **Enemies:** id, HP, max HP, block, powers, current move id, move history.
+- **Enemies:** id, HP, max HP, block, powers, current move id, AI state.
 - **Combat:** turn number and any pending in-combat selection.
 
 A position is never carried over from the previous one. One mismatch therefore cannot corrupt the rest of the run, and the coach works when started mid-run.
@@ -139,6 +140,7 @@ A position is never carried over from the previous one. One mismatch therefore c
 
 - After each of your moves, `fidelity` applies the same move in the simulator and compares the visible result with the game's: damage, block, powers, energy and card movement.
 - A deterministic mismatch writes a gap report (section 5.5).
+- **Random outcomes are checked for plausibility only.** A field that varies across resampled simulator runs of the same move (random targets, generated cards) counts as random. The game's value only has to be one the simulator can produce.
 - Unknown ids at import (a card, relic, power or enemy the simulator does not model) mark the position as unreliable.
 - The panel shows a warning line whenever the current fight involves unmodelled content or a mismatch from the last 10 moves.
 
@@ -259,6 +261,7 @@ Everything trains locally: simulation on the performance cores and networks in P
 - **Saves:** mods switch the game to a separate save set.
   - Setup backs up the normal profile, then copies it into modded profile 1 (yours) and modded profile 3 (autopilot), with the game closed.
   - If the game rejects the copied saves, restore the backup and play on a fresh modded profile.
+  - If Steam Cloud reports a conflict afterwards, keep the local copy.
 - **Security:** the mod's API listens on localhost only and requires the auth token.
 - **Performance:** search workers run at reduced priority. The worker count is tuned so the game's frame rate is unaffected.
 
@@ -275,7 +278,7 @@ Everything trains locally: simulation on the performance cores and networks in P
 
 ### Stage 0: setup (part of stage 1)
 
-- Install the .NET 9 SDK.
+- Install the .NET 9 SDK, plus Xcode Command Line Tools if missing (needed to link the NativeAOT library).
 - Build the merged mod and install it into `SlayTheSpire2.app/Contents/MacOS/mods/`.
 - Enable mods in the game.
 - Back up and copy saves.
@@ -327,7 +330,7 @@ Pushing any of these to GitHub is optional and happens only on request.
 
 | Risk | Mitigation |
 |---|---|
-| Enemy AI state cannot be fully read for some enemies | Read the move state via reflection in the mod. Otherwise resample from the enemy's move table given the shown intent, and flag the position. |
+| Enemy AI state differs per monster and some of it may be hard to read | Map the fields per monster type from the decompiled AI code and read them by reflection. Otherwise resample from the enemy's move table given the shown intent, and flag the position. |
 | Snapshot loading misses a mechanic (enchantments, temporary cost changes, statuses) | The round-trip and one-step gates catch it; the fidelity check keeps catching it in live play. |
 | Python search loop too slow | The measured budget already exceeds the author's settings by more than 10×. If not, move the MCTS loop into C#. |
 | Upstream simulator churn | Pin commits and merge upstream deliberately. |
