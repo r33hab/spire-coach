@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,7 +14,7 @@ APP_BUNDLE = GAME_DIR / "SlayTheSpire2.app"
 MODS_DIR = APP_BUNDLE / "Contents/MacOS/mods"
 RELEASE_INFO = APP_BUNDLE / "Contents/Resources/release_info.json"
 SAVE_ROOT = Path.home() / "Library/Application Support/SlayTheSpire2/steam"
-TOKEN_FILE_NAME = "STS2_MCP.token"
+CONF_FILE_NAME = "STS2_MCP.conf"
 DEFAULT_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
 
@@ -27,11 +28,13 @@ class Config:
 
 
 def read_token(mods_dir: Path) -> str | None:
-    """The mod and the coach share one secret, stored next to the mod's DLL."""
+    """The mod and the coach share one secret, stored in the mod's conf file."""
     try:
-        token = (mods_dir / TOKEN_FILE_NAME).read_text(encoding="utf-8").strip()
+        raw = (mods_dir / CONF_FILE_NAME).read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
+    token = json.loads(raw).get("token", "")
+    token = token.strip() if isinstance(token, str) else ""
     return token or None
 
 

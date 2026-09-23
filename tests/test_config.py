@@ -1,4 +1,10 @@
-from coach.config import DEFAULT_BASE_URL, TOKEN_FILE_NAME, load_config, read_token
+import json
+
+from coach.config import CONF_FILE_NAME, DEFAULT_BASE_URL, load_config, read_token
+
+
+def write_conf(mods_dir, **fields):
+    (mods_dir / CONF_FILE_NAME).write_text(json.dumps(fields), encoding="utf-8")
 
 
 def test_defaults_when_env_is_empty(tmp_path):
@@ -9,21 +15,30 @@ def test_defaults_when_env_is_empty(tmp_path):
     assert cfg.mods_dir == tmp_path
 
 
-def test_token_is_read_from_the_mods_dir(tmp_path):
-    (tmp_path / TOKEN_FILE_NAME).write_text("abc123\n", encoding="utf-8")
+def test_read_token_is_none_when_the_conf_file_is_missing(tmp_path):
+    assert read_token(tmp_path) is None
+
+
+def test_read_token_is_none_when_the_key_is_missing(tmp_path):
+    write_conf(tmp_path, port=15526, allow_hidden_state=False)
+    assert read_token(tmp_path) is None
+
+
+def test_read_token_is_none_when_the_token_is_blank(tmp_path):
+    write_conf(tmp_path, port=15526, token="   ")
+    assert read_token(tmp_path) is None
+
+
+def test_token_is_read_from_the_conf_file(tmp_path):
+    write_conf(tmp_path, port=15526, token="abc123")
     assert read_token(tmp_path) == "abc123"
     assert load_config({"SPIRE_COACH_MODS_DIR": str(tmp_path)}).token == "abc123"
 
 
 def test_env_token_overrides_the_file(tmp_path):
-    (tmp_path / TOKEN_FILE_NAME).write_text("from-file", encoding="utf-8")
+    write_conf(tmp_path, port=15526, token="from-file")
     cfg = load_config({"SPIRE_COACH_MODS_DIR": str(tmp_path), "SPIRE_COACH_TOKEN": "from-env"})
     assert cfg.token == "from-env"
-
-
-def test_blank_token_file_means_no_token(tmp_path):
-    (tmp_path / TOKEN_FILE_NAME).write_text("   \n", encoding="utf-8")
-    assert read_token(tmp_path) is None
 
 
 def test_trailing_slash_is_stripped_from_base_url(tmp_path):
