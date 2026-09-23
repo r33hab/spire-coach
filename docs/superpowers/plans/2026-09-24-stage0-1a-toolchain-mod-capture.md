@@ -594,4 +594,281 @@ git commit -m "feat: add save backup, modded-slot seeding and restore with game-
 
 ---
 
-<!-- Tasks 4–12 (mod merge and additions, installer, bridge, decisions, capture, live smoke test) are appended once the mod-merge research report is verified. -->
+## Mod tasks (4–6): the STS2MCP fork at `~/Documents/git/STS2MCP`
+
+Shared facts for Tasks 4–6. They were verified against the v0.107.1 game DLL in `.superpowers/sdd/research/mod-merge-report.md`, which every mod implementer must read; the sections are cited below.
+- A merged, building tree exists in the scratch clone `/private/tmp/claude-501/-Users-r33hab/547e675b-0c52-416b-8614-38e7cf7ee834/scratchpad/mod-merge/STS2MCP`, on branch `spire-coach` at `2df6073`:
+  - upstream `55e0648`;
+  - plus evangambit `608fd7a`, merged in `3614a8f`;
+  - plus cat12079801 `9853cba`, merged in `82f4f6b` with 8 textual and 5 semantic conflicts resolved (report §2);
+  - plus the cherry-pick timothy `409fc77`, as `2df6073`.
+- The build command, run from the repo root with the .NET env sourced:
+  `dotnet build STS2_MCP.csproj -c Release -o out/STS2_MCP -p:STS2GameDir="$HOME/Library/Application Support/Steam/steamapps/common/Slay the Spire 2"`.
+  The pass criterion is `0 Warning(s), 0 Error(s)`.
+- The mod has no unit-test project. Verification means a clean build, a review, and Task 12's live smoke test. Every new HTTP field or endpoint must be documented in `docs/raw-full.md` in the same commit.
+- Never push. Never modify the game install in Tasks 4–6: installation happens in Task 7, via the coach, and live in Task 12.
+
+### Task 4: Integrate the merge; token, origin and CORS lockdown; hidden-state and debug gates
+
+**Files:** `~/Documents/git/STS2MCP`: git remotes and branch, `McpMod.cs`, `McpMod.Actions.cs`, `McpMod.StateBuilder.cs`, `McpMod.Helpers.cs` if needed, `.gitignore`, `docs/raw-full.md`, `README.md` (the auth section).
+
+**Interfaces:**
+- Produces:
+  - `STS2_MCP.conf` (JSON, next to the DLL) keys: `port` (int, default 15526), `token` (string; if absent the mod generates 64 hex chars and writes it back), `allow_hidden_state` (bool, default false), `allow_debug_actions` (bool, default false).
+  - The env var `STS2_MCP_TOKEN` overrides the conf token.
+  - Every request must carry the header `X-STS2-Token: <token>` or `Authorization: Bearer <token>`.
+
+Requirements:
+1. In `~/Documents/git/STS2MCP`:
+   - `git remote add scratch <scratch clone path>`, `git fetch scratch`;
+   - add remotes `evangambit` and `cat` (https URLs from the report §1) and fetch them;
+   - `git checkout -b spire-coach scratch/spire-coach`, and confirm HEAD is `2df6073`;
+   - set every remote's push URL to `DISABLED_NO_PUSH` (`git remote set-url --push <r> DISABLED_NO_PUSH`);
+   - make sure `out/` and `obj/` are gitignored.
+2. Token check exactly as report §6(1): constant-time compare; Origin header present → 403 "Browser origins are not permitted"; missing or invalid token → 401 "Missing or invalid token". Remove the three `Access-Control-Allow-*` headers. POST bodies must be `application/json` (415 otherwise). The token must be set before `_listener.Start()`.
+3. Hidden state:
+   - `draw_pile_ordered`, the true draw order (StateBuilder.cs:1652–1665), is emitted only when `allow_hidden_state` is true **and** the GET query has `hidden=1`.
+   - `hand_ordered`, `discard_pile_ordered` and `exhaust_pile_ordered` stay, because their order is visible to the player.
+   - Audit the merged tree for any other field revealing RNG, pools or future encounters, gate each the same way, and list them in the commit message.
+4. Debug and staging actions (evangambit's `McpMod.Debug.cs`: `debug_add_card`, `debug_set_energy`, `debug_add_power`, `debug_set_stars`, `debug_enchant_card`, `debug_start_event`, `debug_start_shop` and their siblings) mutate game state. When `allow_debug_actions` is false they return 403 `{"status":"error","error":"debug actions disabled"}`.
+5. Build: 0 warnings, 0 errors.
+6. Commit `feat(security): token auth, no browser origins, gated hidden state and debug actions`.
+
+### Task 5: State fields the coach's snapshot needs; schema version 4
+
+**Files:** `McpMod.StateBuilder.cs` (and a new partial `McpMod.StateExtras.cs` if StateBuilder grows past its current structure), `McpMod.cs` (the `StateSchemaVersion` constant), `docs/raw-full.md`.
+
+**Interfaces:**
+- Produces new JSON fields, which `coach/snapshot.py` (Task 11) consumes:
+  - Pile cards (`draw_pile[]`, `discard_pile[]`, `exhaust_pile[]`): add `id` (`card.Id.Entry`), `is_upgraded`, `upgrade_level`. `*_ordered[]` entries: add `uid`.
+  - Every card object (hand, piles, deck): `enchantment: {id, amount} | null` and `affliction: string | null` (report §6 follow-ups), plus `fields: {name: value}`. `fields` holds the card's runtime cost overrides (cost-this-turn, cost-for-combat and similar), found by reading the decompiled `CardModel`/energy-cost types. Only primitive values, only when they differ from a fresh copy.
+  - Every enemy:
+    - `move_id` (`creature.Monster?.NextMove?.StateId`), `move_follow_up_id`, `is_stunned` (`creature.IsStunned`);
+    - `state_log` (`monster.MoveStateMachine.StateLog.Select(s => s.Id)`);
+    - `slot`, the creature's position index among the combat's enemy slots, taken from the game's own slot/position data;
+    - `ai_fields`: declared `int`/`bool`/`enum`/`string` instance fields and properties of the concrete monster class, walking up to but excluding `MonsterModel`, and excluding any `Rng`-typed member;
+    - per attack intent: `damage` (displayed, per hit, as the game computes it for the player), `base_damage` (unmodified per hit; find the correct API on the decompiled `AttackIntent`) and `hits`.
+  - Every relic: `status`, `is_used_up`, `stack_count`, `saved` (report §6(4) `BuildSavedProps`), and `fields` (declared `int`/`bool` instance fields up to `RelicModel`).
+  - `battle.history`, from `CombatManager.Instance.History`: `cards_played_this_turn`, `attacks_played_this_turn`, `skills_played_this_turn`, `powers_played_this_turn`, `cards_played_this_combat`.
+  - `schema_version`: 4.
+
+Requirements:
+1. Every new read sits in a try/catch that routes the exception to the existing `Warn(...)` warnings mechanism. A failing field must never drop the whole payload.
+2. **Never export** `RunRng.MonsterAi` state, RNG seeds or counters, or the `_initialState` of the AI graph beyond what `state_log`/`move_id` show. Report §6(2) explains why.
+3. `docs/raw-full.md`: document every new field and set the schema to 4.
+4. Build: 0 warnings, 0 errors.
+5. Commit `feat(state): move ids, AI state, card/relic/pile details and history for the coach (schema 4)`.
+
+### Task 6: Player action log; character-select race fix; time scale
+
+**Files:** create `McpMod.ActionLog.cs`; modify `McpMod.cs` (routing, `EnsureActionHooks` call in `ProcessMainThreadQueue`), `McpMod.Actions.cs` (`_apiDepth` wrap, `set_time_scale`, character-select port), `McpMod.StateBuilder.cs` (`action_log_seq`, `time_scale`), `docs/raw-full.md`.
+
+**Interfaces:**
+- Produces:
+  - `GET /api/v1/actions?since=<seq>` returns `{"status":"ok","latest_seq":N,"entries":[...]}`. Each entry is `{seq, kind: "play_card"|"use_potion"|"end_turn", source: "human"|"api", utc, act, floor, round, card_id?, card_uid?, target?, target_combat_id?, slot?}`, held in a ring buffer capped at 2000.
+  - `action_log_seq` in every state payload.
+  - The action `{"action":"set_time_scale","scale":<float 0.5–10>}` and the state field `time_scale`.
+
+Requirements:
+1. Implement report §6(3):
+   - hook through `ActionQueueSet.ActionEnqueued`, re-attached whenever the queue-set reference changes, and `CombatManager.PlayerEndedTurn`;
+   - source tagging through `_apiDepth` around `ExecuteAction`'s dispatch;
+   - thread safety under `_logLock`;
+   - log only for the local player.
+2. Port cicero `7e4977a` by hand (report §3): `IsCharacterSelectionBusy()`, Deselect-before-Select, the `selection_busy` and `selected_character` state fields. Do **not** take its manifest bump.
+3. `set_time_scale` sets `Godot.Engine.TimeScale` through `RunOnMainThreadBlocking` + `EnsureStatus`, clamped to 0.5–10. The state reports the current value.
+4. Build: 0 warnings, 0 errors.
+5. Commit `feat(actions): player action log with source tags, character-select race fix, time scale`.
+
+---
+
+## Coach tasks (7–11): the Python package in `~/Documents/git/spire-coach`
+
+Shared facts: the mod JSON field reference is report §5c plus Tasks 5–6 above. Tests use hand-written payload fixtures under `tests/fixtures/mod/`, built from those field lists. Mocked HTTP uses `httpx.MockTransport`, and no test talks to a real game.
+
+### Task 7: Mod installer, settings enabler, token from the conf
+
+**Files:** create `coach/modinstall.py` and `tests/test_modinstall.py`; modify `coach/config.py` and `tests/test_config.py`.
+
+**Interfaces:**
+- Produces:
+  - `build_mod(repo: Path, *, game_dir: Path = GAME_DIR, run=subprocess.run) -> Path` builds the DLL and returns `repo/out/STS2_MCP/STS2_MCP.dll`. It raises `InstallError` with the build output tail on failure.
+  - `install_mod(dll: Path, manifest: Path, mods_dir: Path, *, is_running=game_is_running, now=None, token_factory=lambda: secrets.token_hex(32)) -> InstallResult(previous_backup: Path | None, token_created: bool)`.
+  - `enable_mod_in_settings(settings_path: Path, backup_root: Path, *, mod_id="STS2_MCP", is_running=game_is_running, now=None) -> Path` returns the backup path.
+  - `class InstallError(Exception)`.
+  - `coach.config.read_token(mods_dir)` now reads `"token"` from `mods_dir/STS2_MCP.conf` (JSON) and returns None when the file or key is missing or blank. `TOKEN_FILE_NAME` is replaced by `CONF_FILE_NAME = "STS2_MCP.conf"`.
+
+Requirements:
+1. `install_mod`:
+   - refuses while the game runs;
+   - moves any existing `STS2_MCP.dll`, `STS2_MCP.json` and `STS2_MCP.conf` into `mods_dir/.previous/<stamp>/`, keeping the conf's token by copying the conf back;
+   - copies the DLL to `STS2_MCP.dll` and the manifest to `STS2_MCP.json`;
+   - ensures `STS2_MCP.conf` has `port` 15526 and a `token`, keeping an existing token and generating one otherwise;
+   - writes the conf with mode `0600`.
+2. `enable_mod_in_settings`:
+   - refuses while the game runs;
+   - copies `settings.save` to `backup_root/settings.save.<stamp>`;
+   - sets `mod_settings.mods_enabled = true` and the `STS2_MCP` entry's `is_enabled = true` (appending `{"id": "STS2_MCP", "is_enabled": true, "source": "mods_directory"}` if absent);
+   - preserves every other key and the file's JSON formatting (2-space indent).
+3. Tests with temp dirs:
+   - a fresh install creates the conf with a 64-hex token;
+   - a reinstall keeps the token and backs up the old files;
+   - both functions refuse while the game runs, with nothing changed;
+   - the settings flip preserves other keys and adds the entry when missing;
+   - `build_mod` failure raises `InstallError` (fake `run`);
+   - `read_token` covers missing file, missing key, blank and valid tokens.
+   Update the Task 2 config tests to the conf format.
+4. Commit `feat(install): mod installer, settings enabler and conf-based token`.
+
+### Task 8: Bridge client
+
+**Files:** create `coach/bridge/__init__.py`, `coach/bridge/client.py` and `tests/test_bridge_client.py`.
+
+**Interfaces:**
+- Produces:
+  - `ModClient(base_url: str, token: str | None, *, timeout_s: float = 2.0, transport: httpx.BaseTransport | None = None)`, with methods:
+    - `hello() -> dict`
+    - `get_state() -> dict`, calling `GET /api/v1/singleplayer`. It never sends `hidden=1`: there is no parameter for it.
+    - `post_action(action: dict, *, wait: bool = True, wait_timeout_ms: int = 10000) -> dict`
+    - `actions_since(seq: int) -> dict`
+    - `compendium() -> dict`
+    - `close()`
+  - Errors: `BridgeError(Exception)`, `BridgeUnavailable(BridgeError)` for connection refused or timeout, `BridgeAuthError(BridgeError)` for 401/403 with the server message. A 503 with `retry: true` becomes `BridgeUnavailable`.
+
+Requirements:
+1. Every request sends `X-STS2-Token` when a token is set. POSTs send JSON (`Content-Type: application/json`).
+2. Error messages are one line, human-readable and name the remedy. A 401 says "token rejected: reinstall the mod (spire-coach mod install) or check STS2_MCP.conf".
+3. Tests (MockTransport):
+   - the header is present;
+   - no `hidden` param ever appears in any request URL;
+   - 401 → `BridgeAuthError` with the remedy text;
+   - a connect error → `BridgeUnavailable`;
+   - 503 retry → `BridgeUnavailable`;
+   - non-JSON → `BridgeError`;
+   - `post_action` puts `wait` and `wait_timeout_ms` in the body;
+   - `actions_since` passes `since`.
+4. Commit `feat(bridge): mod HTTP client with auth and clear errors`.
+
+### Task 9: Decision detection, settling, versions
+
+**Files:** create `coach/bridge/decisions.py`, `coach/bridge/versions.py`, `tests/test_decisions.py`, `tests/test_versions.py` and the fixtures under `tests/fixtures/mod/`.
+
+**Interfaces:**
+- Produces:
+  - `DecisionKind`, an Enum: `COMBAT`, `HAND_SELECT`, `NON_COMBAT`, `NONE`.
+  - `Decision(kind, state_type, room_type)`, a frozen dataclass.
+  - `classify(state: dict) -> Decision`.
+  - `is_settled(state) -> bool`.
+  - `fingerprint(state) -> str`.
+  - `class Stabilizer`, with `feed(state) -> dict | None`. It returns the state once the same settled fingerprint has been seen on 2 consecutive polls.
+  - `read_game_version(release_info: Path = RELEASE_INFO) -> str | None`.
+  - `EXPECTED_MOD_SCHEMA = 4`.
+  - `check_versions(game_version: str | None, payload: dict) -> VersionStatus(ok: bool, problems: list[str])`.
+
+Requirements:
+1. Settled means `is_resolving` is false; and in combat (`state_type` in monster/elite/boss) also `battle.is_play_phase` is true and `battle.turn == "player"`. `hand_select` counts as settled when `is_resolving` is false.
+2. `classify`:
+   - combat states → COMBAT;
+   - `hand_select` → HAND_SELECT;
+   - rewards, card_reward, map, shop, rest_site, event, treasure, card_select and relic_select → NON_COMBAT;
+   - anything else, or an unsettled state → NONE.
+   `room_type` is the combat `state_type`, or None.
+3. `fingerprint`: a sha1 of canonical JSON over `state_type`, `battle`, `player` and `run`, ignoring `warnings`, `mod_commit`, `action_log_seq` and `time_scale`.
+4. `check_versions` flags each of these:
+   - game version ≠ `v0.107.1`;
+   - `schema_version` ≠ 4;
+   - `mod_version` not starting with `0.4`;
+   - a missing field.
+   Each problem is a one-line message.
+5. Tests: every classification branch; the settle rules including enemy turn and mid-resolution; the Stabilizer needs two identical settled polls and resets on change; versions ok or mismatched per field.
+6. Commit `feat(bridge): decision detection, settling and version checks`.
+
+### Task 10: Run log, capture loop, CLI
+
+**Files:** create `coach/runlog.py`, `coach/capture.py`, `coach/cli.py`, `tests/test_runlog.py`, `tests/test_capture.py` and `tests/test_cli.py`.
+
+**Interfaces:**
+- Consumes: Tasks 3, 7, 8 and 9.
+- Produces:
+  - `RunLog(data_dir: Path, *, now=None)` writes to `data/captures/<stamp>.jsonl`, with `append(kind: str, payload: dict) -> None`. Each line is `{ts, kind, payload}`, flushed on every write.
+  - `capture_loop(client, log, *, poll_interval_s, stop: Callable[[], bool], sleep=time.sleep, out=print) -> CaptureStats(records, actions, errors)`.
+  - `main(argv: list[str] | None = None) -> int`, the console script with these subcommands:
+    - `doctor`
+    - `capture`
+    - `saves backup`
+    - `saves seed-modded --from N --to M`
+    - `saves restore PATH`
+    - `mod install [--repo PATH]`
+    - `mod enable`
+
+Requirements:
+1. `capture_loop`:
+   - polls `get_state`;
+   - passes each state through a `Stabilizer`;
+   - logs each stabilized state as a `"state"` record with its `Decision` and `check_versions` result;
+   - polls `actions_since` and logs each new entry as an `"action"` record;
+   - on `BridgeUnavailable`, prints "waiting for game…" once, sleeps 1 s and retries, then prints "game connected" on recovery;
+   - on `BridgeAuthError`, prints the message and returns with `errors` counted, and the CLI exits with code 2.
+2. `doctor` prints one line per check, each ✓/✗:
+   - game dir exists;
+   - game version;
+   - mod files are installed (DLL, JSON, conf);
+   - token present;
+   - the mod is enabled in `settings.save`;
+   - whether the game is running;
+   - `hello` reachable;
+   - auth accepted;
+   - versions ok.
+   It exits 0 only when all pass.
+3. The `saves` and `mod` subcommands call Tasks 3 and 7's functions and print what they did, including backup paths.
+4. Tests:
+   - the capture loop over a scripted fake client (resolving → settled twice → unavailable → back → an auth error) produces exactly the expected records and messages;
+   - the RunLog writes valid JSONL;
+   - the CLI parses every subcommand and calls the right function (monkeypatched);
+   - `doctor` output shows ✗ lines when checks fail.
+5. Commit `feat(capture): run log, capture loop and spire-coach CLI`.
+
+### Task 11: Live snapshot builder (mod JSON → `sts2-live-snapshot/1`)
+
+**Files:** create `coach/snapshot.py`, `tests/test_snapshot.py` and fixtures.
+
+**Interfaces:**
+- Consumes: the mod fields from report §5c plus Tasks 5–6, and schema `docs/superpowers/specs/2026-09-24-snapshot-schemas.md` §1 (binding).
+- Produces:
+  - `build_live_snapshot(state: dict, *, game_version: str, room_type: str | None = None, known_top: list[dict] | None = None, known_bottom: list[dict] | None = None) -> dict`
+  - `class SnapshotError(Exception)`, carrying a JSON path.
+
+Requirements:
+1. Build every field of schema §1 through an explicit allowlist (named field reads only, never dict copies):
+   - Strip category prefixes (`CHARACTER.IRONCLAD` → `IRONCLAD`).
+   - Card `cost` becomes an int, or null for `"X"` or unplayable.
+   - Hand order comes from `hand[]` index. `draw_pile` is a multiset sorted by (id, upgraded). Discard and exhaust order come from `*_ordered` when present.
+   - Enemies: alive enemies plus those with a `revive` block. The enemy id is the `entity_id` without its `_<n>` suffix.
+   - Intents take `damage`/`base_damage`/`hits` from the intent objects.
+   - `hand_select` becomes `pending_selection` (schema §1.1).
+2. **Never read or copy** `draw_pile_ordered`, any RNG field, or unknown keys. Test: an input carrying `draw_pile_ordered` in an order that differs from the sorted draw pile; the output's draw pile is the sorted multiset, and nothing in the output depends on that order.
+3. A missing required field raises `SnapshotError` naming the path (e.g. `player.hp`).
+4. Tests:
+   - a full combat fixture produces the exact expected snapshot;
+   - the hidden-order test above;
+   - `hand_select` → `pending_selection`;
+   - a reviving enemy is kept and a dead one is dropped;
+   - an X-cost card;
+   - a missing field raises with its path;
+   - the output validates structurally against schema §1: required keys and types.
+5. Commit `feat(snapshot): build live snapshots from mod state with a visible-field allowlist`.
+
+---
+
+### Task 12: Live smoke test (run by the controller, not a subagent)
+
+Steps, in order. Any failure stops the task and is logged.
+1. Confirm the game is closed (`pgrep`).
+2. `spire-coach saves seed-modded --from 1 --to 1` and `--from 1 --to 3`. Record the backup paths.
+3. `spire-coach mod install --repo ~/Documents/git/STS2MCP` builds and installs the DLL, manifest and conf. Then `spire-coach mod enable`.
+4. Launch through Steam: `open "steam://rungameid/2868840"`. Wait until `hello` answers, up to 180 s.
+5. `spire-coach doctor` passes every check.
+6. Through the API: switch to profile 3 (`POST /api/v1/profiles {"action":"switch","profile_id":3}`), then start an Ironclad run through `menu_select`.
+7. Run `spire-coach capture` while driving at least one full fight through the API (`play_card`/`end_turn` with `wait`). Record ≥ 30 settled combat states and their action-log entries, all with `source = "api"`.
+8. Build a live snapshot from every captured combat state with `build_live_snapshot`, with zero errors. Hand-check one against the game screen.
+9. Leave the game on the main menu, close it cleanly, and record the results in the ledger.
