@@ -106,6 +106,10 @@ def restore(
     if not any(backup_path.glob("profile*")):
         raise SaveError(f"{backup_path} is not a save backup")
     aside = steam_dir.with_name(f"{steam_dir.name}.replaced-{_stamp(now)}")
+    if aside.exists():
+        raise SaveError(
+            f"restore target already exists: {aside}; wait a second and retry"
+        )
     steam_dir.rename(aside)
     shutil.copytree(backup_path, steam_dir)
     return aside

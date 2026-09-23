@@ -133,3 +133,44 @@ def test_restore_rejects_a_folder_that_is_not_a_backup(tmp_path):
     not_backup.mkdir()
     with pytest.raises(SaveError, match="not a save backup"):
         restore(not_backup, steam, now=NOW, is_running=never_running)
+
+
+def test_backup_refuses_to_clobber_an_existing_backup(tmp_path):
+    steam = make_save_tree(tmp_path)
+    dest1 = backup(steam, tmp_path / "backups", now=NOW, is_running=never_running)
+    # Verify first backup was created with expected content
+    assert (dest1 / "profile1" / "saves" / "progress.save").exists()
+    # Second backup with same timestamp should fail
+    with pytest.raises(SaveError, match="already exists"):
+        backup(steam, tmp_path / "backups", now=NOW, is_running=never_running)
+    # First backup contents are intact
+    assert (dest1 / "profile1" / "saves" / "progress.save").exists()
+
+
+def test_restore_refuses_while_the_game_runs_and_changes_nothing(tmp_path):
+    steam = make_save_tree(tmp_path)
+    dest = backup(steam, tmp_path / "backups", now=NOW, is_running=never_running)
+    # Modify a file to verify it's not restored
+    (steam / "profile1" / "saves" / "progress.save").write_text('{"unlocks": "modified"}')
+    with pytest.raises(SaveError, match="running"):
+        restore(dest, steam, now=NOW, is_running=always_running)
+    # Modified file is still modified (nothing was restored)
+    assert (steam / "profile1" / "saves" / "progress.save").read_text() == '{"unlocks": "modified"}'
+    # No .replaced- folder was created
+    parent = steam.parent
+    replaced_folders = list(parent.glob(f"{steam.name}.replaced-*"))
+    assert len(replaced_folders) == 0
+
+
+def test_restore_refuses_to_clobber_on_collision(tmp_path):
+    steam = make_save_tree(tmp_path)
+    dest = backup(steam, tmp_path / "backups", now=NOW, is_running=never_running)
+    # First restore succeeds
+    aside1 = restore(dest, steam, now=NOW, is_running=never_running)
+    assert aside1.exists()
+    # Second restore with same timestamp should fail
+    (steam / "profile1" / "saves" / "progress.save").write_text('{"unlocks": "modified"}')
+    with pytest.raises(SaveError, match="already exists"):
+        restore(dest, steam, now=NOW, is_running=never_running)
+    # steam_dir content is unchanged
+    assert (steam / "profile1" / "saves" / "progress.save").read_text() == '{"unlocks": "modified"}'
