@@ -1,7 +1,7 @@
 {
   "state_type": "hand_select",
   "mod_version": "0.4.0",
-  "mod_commit": "59260271",
+  "mod_commit": "d520733",
   "schema_version": 4,
   "rooms_entered": 3,
   "action_log_seq": 15,

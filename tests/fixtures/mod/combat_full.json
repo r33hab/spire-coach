@@ -1,7 +1,7 @@
 {
   "state_type": "monster",
   "mod_version": "0.4.0",
-  "mod_commit": "59260271",
+  "mod_commit": "d520733",
   "schema_version": 4,
   "rooms_entered": 3,
   "action_log_seq": 12,
@@ -21,10 +21,12 @@
         "max_hp": 44,
         "block": 4,
         "status": [
-          {"id": "STRENGTH", "name": "Strength", "amount": 3, "type": "Buff", "description": "Increases attack damage by 3.", "keywords": []}
+          {"id": "STRENGTH_POWER", "name": "Strength", "amount": 3, "type": "Buff", "description": "Increases attack damage by 3.", "keywords": []}
         ],
         "intents": [
-          {"type": "Attack", "label": "11", "title": "Attack", "description": "Deals 11 damage.", "damage": 11, "base_damage": 8, "hits": 1}
+          {"type": "Attack", "label": "11", "title": "Attack", "description": "Deals 11 damage.", "damage": 11, "base_damage": 8, "hits": 1},
+          {"type": "DeathBlow", "label": "20", "title": "Lethal Strike", "description": "Deals 20 damage. Defeated enemies are removed from combat.", "damage": 20, "base_damage": 15, "hits": 1},
+          {"type": "StatusCard", "label": "Wound", "title": "Status Card", "description": "Shuffles a Wound into your draw pile."}
         ],
         "move_id": "CHOMP_MOVE",
         "move_follow_up_id": "BELLOW_MOVE",
@@ -42,7 +44,7 @@
         "max_hp": 46,
         "block": 0,
         "status": [
-          {"id": "REATTACH", "name": "Reattach", "amount": 1, "type": "Buff", "description": "Will reattach.", "keywords": []}
+          {"id": "REATTACH_POWER", "name": "Reattach", "amount": 1, "type": "Buff", "description": "Will reattach.", "keywords": []}
         ],
         "revive": {"in_turns": 2, "power_id": "REATTACH_POWER", "power_name": "Reattach", "hp": 25},
         "intents": [],
@@ -93,7 +95,7 @@
       {"index": 2, "uid": "c3", "id": "ASCENDERS_BANE", "name": "Ascender's Bane", "type": "Curse", "cost": "-2", "star_cost": null, "description": "Unplayable.", "rarity": "Special", "target_type": "None", "can_play": false, "unplayable_reason": "Unplayable", "is_upgraded": false, "is_upgradable": false, "upgrade_level": 0, "max_upgrade_level": 0, "keywords": [], "enchantment": null, "affliction": "BOUND", "fields": {}},
       {"index": 3, "uid": "c4", "id": "TRUE_GRIT", "name": "True Grit", "type": "Skill", "cost": "0", "star_cost": null, "description": "Gain 7 Block.", "rarity": "Common", "target_type": "Self", "can_play": true, "unplayable_reason": null, "is_upgraded": false, "is_upgradable": true, "upgrade_level": 0, "max_upgrade_level": 1, "keywords": [], "enchantment": null, "affliction": null, "fields": {"cost_this_turn": 0}}
     ],
-    "draw_pile_count": 5,
+    "draw_pile_count": 6,
     "discard_pile_count": 2,
     "exhaust_pile_count": 1,
     "draw_pile": [
@@ -101,7 +103,8 @@
       {"uid": "c6", "name": "Defend", "cost": "1", "star_cost": null, "description": "Gain 5 Block.", "id": "DEFEND_IRONCLAD", "is_upgraded": false, "upgrade_level": 0, "enchantment": null, "affliction": null, "fields": {}},
       {"uid": "c7", "name": "Defend", "cost": "1", "star_cost": null, "description": "Gain 5 Block.", "id": "DEFEND_IRONCLAD", "is_upgraded": false, "upgrade_level": 0, "enchantment": null, "affliction": null, "fields": {}},
       {"uid": "c8", "name": "Bash", "cost": "2", "star_cost": null, "description": "Deal 8 damage. Apply 2 Vulnerable.", "id": "BASH", "is_upgraded": false, "upgrade_level": 0, "enchantment": null, "affliction": null, "fields": {}},
-      {"uid": "c9", "name": "Anger", "cost": "0", "star_cost": null, "description": "Deal 6 damage.", "id": "ANGER", "is_upgraded": false, "upgrade_level": 0, "enchantment": null, "affliction": null, "fields": {}}
+      {"uid": "c9", "name": "Anger", "cost": "0", "star_cost": null, "description": "Deal 6 damage.", "id": "ANGER", "is_upgraded": false, "upgrade_level": 0, "enchantment": null, "affliction": null, "fields": {}},
+      {"uid": "c13", "name": "Ascender's Bane", "cost": "-2", "star_cost": null, "description": "Unplayable.", "id": "ASCENDERS_BANE", "is_upgraded": false, "upgrade_level": 0, "enchantment": null, "affliction": "BOUND", "fields": {}}
     ],
     "discard_pile": [
       {"uid": "c10", "name": "Iron Wave", "cost": "1", "star_cost": null, "description": "Gain 5 Block. Deal 5 damage.", "id": "IRON_WAVE", "is_upgraded": false, "upgrade_level": 0, "enchantment": null, "affliction": null, "fields": {}},
@@ -128,15 +131,16 @@
       {"id": "ANGER", "is_upgraded": false, "uid": "c9"},
       {"id": "DEFEND_IRONCLAD", "is_upgraded": false, "uid": "c6"},
       {"id": "STRIKE_IRONCLAD", "is_upgraded": true, "uid": "c5"},
-      {"id": "DEFEND_IRONCLAD", "is_upgraded": false, "uid": "c7"}
+      {"id": "DEFEND_IRONCLAD", "is_upgraded": false, "uid": "c7"},
+      {"id": "ASCENDERS_BANE", "is_upgraded": false, "uid": "c13"}
     ],
     "status": [
-      {"id": "STRENGTH", "name": "Strength", "amount": 2, "type": "Buff", "description": "Increases attack damage by 2.", "keywords": []}
+      {"id": "STRENGTH_POWER", "name": "Strength", "amount": 2, "type": "Buff", "description": "Increases attack damage by 2.", "keywords": []}
     ],
     "relics": [
       {"id": "BURNING_BLOOD", "name": "Burning Blood", "description": "At the end of combat, heal 6 HP.", "counter": null, "keywords": [], "status": "Normal", "is_used_up": false, "stack_count": 1, "saved": null, "fields": {}},
-      {"id": "KUNAI", "name": "Kunai", "description": "Every 3 Attacks in a single turn, gain 1 Dexterity.", "counter": 2, "keywords": [], "status": "Normal", "is_used_up": false, "stack_count": 1, "saved": null, "fields": {"_isActivating": false, "_attacksPlayedThisTurn": 2}},
-      {"id": "PEN_NIB", "name": "Pen Nib", "description": "Every 10th Attack you play deals double damage.", "counter": 9, "keywords": [], "status": "Normal", "is_used_up": false, "stack_count": 1, "saved": {"AttacksPlayed": 19}, "fields": {}}
+      {"id": "KUNAI", "name": "Kunai", "description": "Every 3 Attacks in a single turn, gain 1 Dexterity.", "counter": 2, "keywords": [], "status": "Normal", "is_used_up": false, "stack_count": 1, "saved": null, "fields": {"_attacksPlayedThisTurn": 2}},
+      {"id": "PEN_NIB", "name": "Pen Nib", "description": "Every 10th Attack you play deals double damage.", "counter": 9, "keywords": [], "status": "Normal", "is_used_up": false, "stack_count": 1, "saved": {"AttacksPlayed": 19}, "fields": {"_attacksPlayed": 19}}
     ],
     "potions": [
       {"id": "FIRE_POTION", "name": "Fire Potion", "description": "Deal 20 damage.", "slot": 1, "can_use_in_combat": true, "target_type": "AnyEnemy", "keywords": []}
