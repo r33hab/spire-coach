@@ -55,7 +55,7 @@ JSON. Strings use the game's `ModelId.Entry` form in UPPER_SNAKE_CASE with no ca
     "powers": [{"id": "RITUAL_POWER", "amount": 3}],
     "intents": [{"type": "ATTACK", "damage": 11, "base_damage": 11, "hits": 1}],  // type from the game's IntentType; damage = displayed per hit, base_damage = unmodified per hit; null if n/a
     "move_id": "CHOMP",                 // current MoveState.StateId, null if unknown
-    "state_log": ["CHOMP"],             // MonsterMoveStateMachine.StateLog ids, oldest first (includes branch states)
+    "state_log": ["CHOMP"],             // MonsterMoveStateMachine.StateLog ids, oldest first: MOVES ONLY (a branch state has ShouldAppearInLogs => false and is never logged)
     "ai_fields": {}                     // primitive instance fields of the concrete monster class, by field name
   }],
   "history": {                          // ONLY these 7 keys are accepted (the converter rejects others); a missing key = unknown
