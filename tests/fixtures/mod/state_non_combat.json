@@ -1,0 +1,27 @@
+{
+  "state_type": "shop",
+  "mod_version": "0.4.0",
+  "mod_commit": "59260271",
+  "schema_version": 4,
+  "rooms_entered": 4,
+  "action_log_seq": 20,
+  "is_resolving": false,
+  "run": {
+    "act": 1,
+    "floor": 4,
+    "ascension": 0
+  },
+  "player": {
+    "character": "IRONCLAD",
+    "hp": 70,
+    "max_hp": 80,
+    "block": 0,
+    "gold": 99,
+    "status": [],
+    "relics": [],
+    "potions": [],
+    "max_potion_slots": 3,
+    "deck_count": 10,
+    "deck": []
+  }
+}

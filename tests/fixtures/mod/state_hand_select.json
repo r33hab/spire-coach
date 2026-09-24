@@ -1,0 +1,75 @@
+{
+  "state_type": "hand_select",
+  "mod_version": "0.4.0",
+  "mod_commit": "59260271",
+  "schema_version": 4,
+  "rooms_entered": 3,
+  "action_log_seq": 15,
+  "is_resolving": false,
+  "battle": {
+    "round": 2,
+    "turn": "player",
+    "is_play_phase": false,
+    "enemies": [
+      {
+        "entity_id": "JAW_WORM_0",
+        "combat_id": 42,
+        "name": "Jaw Worm",
+        "alive": true,
+        "hp": 33,
+        "max_hp": 44,
+        "block": 0,
+        "status": [],
+        "intents": []
+      }
+    ],
+    "allies": []
+  },
+  "run": {
+    "act": 1,
+    "floor": 3,
+    "ascension": 0
+  },
+  "player": {
+    "character": "IRONCLAD",
+    "hp": 70,
+    "max_hp": 80,
+    "block": 0,
+    "energy": 1,
+    "max_energy": 3,
+    "gold": 99,
+    "status": [],
+    "relics": [],
+    "potions": [],
+    "max_potion_slots": 3,
+    "deck_count": 10,
+    "deck": [],
+    "hand": [
+      {
+        "index": 0,
+        "uid": "c9",
+        "id": "ARMAMENTS",
+        "name": "Armaments",
+        "type": "Skill",
+        "cost": "1",
+        "star_cost": null,
+        "description": "Gain 5 Block. Upgrade a card in your hand.",
+        "rarity": "Common",
+        "is_upgraded": false,
+        "is_upgradable": true,
+        "upgrade_level": 0,
+        "max_upgrade_level": 1,
+        "keywords": [],
+        "target_type": "None",
+        "can_play": true,
+        "unplayable_reason": null
+      }
+    ],
+    "draw_pile_count": 4,
+    "discard_pile_count": 1,
+    "exhaust_pile_count": 0,
+    "draw_pile": [],
+    "discard_pile": [],
+    "exhaust_pile": []
+  }
+}

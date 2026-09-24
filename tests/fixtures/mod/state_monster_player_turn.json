@@ -1,0 +1,90 @@
+{
+  "state_type": "monster",
+  "mod_version": "0.4.0",
+  "mod_commit": "59260271",
+  "schema_version": 4,
+  "rooms_entered": 3,
+  "action_log_seq": 12,
+  "is_resolving": false,
+  "battle": {
+    "round": 1,
+    "turn": "player",
+    "is_play_phase": true,
+    "enemies": [
+      {
+        "entity_id": "JAW_WORM_0",
+        "combat_id": 42,
+        "name": "Jaw Worm",
+        "alive": true,
+        "hp": 44,
+        "max_hp": 44,
+        "block": 0,
+        "status": [],
+        "intents": [
+          {
+            "type": "Attack",
+            "label": "11",
+            "title": "Attack",
+            "description": "Deals 11 damage."
+          }
+        ]
+      }
+    ],
+    "allies": []
+  },
+  "run": {
+    "act": 1,
+    "floor": 3,
+    "ascension": 0
+  },
+  "player": {
+    "character": "IRONCLAD",
+    "hp": 70,
+    "max_hp": 80,
+    "block": 0,
+    "energy": 3,
+    "max_energy": 3,
+    "gold": 99,
+    "status": [],
+    "relics": [
+      {
+        "id": "BURNING_BLOOD",
+        "name": "Burning Blood",
+        "description": "At the end of combat, heal 6 HP.",
+        "counter": null,
+        "keywords": []
+      }
+    ],
+    "potions": [],
+    "max_potion_slots": 3,
+    "deck_count": 10,
+    "deck": [],
+    "hand": [
+      {
+        "index": 0,
+        "uid": "c1",
+        "id": "STRIKE_IRONCLAD",
+        "name": "Strike",
+        "type": "Attack",
+        "cost": "1",
+        "star_cost": null,
+        "description": "Deal 6 damage.",
+        "rarity": "Basic",
+        "is_upgraded": false,
+        "is_upgradable": true,
+        "upgrade_level": 0,
+        "max_upgrade_level": 1,
+        "keywords": [],
+        "target_type": "Enemy",
+        "can_play": true,
+        "unplayable_reason": null
+      }
+    ],
+    "draw_pile_count": 5,
+    "discard_pile_count": 0,
+    "exhaust_pile_count": 0,
+    "draw_pile": [],
+    "discard_pile": [],
+    "exhaust_pile": []
+  }
+}
