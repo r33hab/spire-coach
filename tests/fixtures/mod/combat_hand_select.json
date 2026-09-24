@@ -1,0 +1,64 @@
+{
+  "state_type": "hand_select",
+  "mod_version": "0.4.0",
+  "mod_commit": "59260271",
+  "schema_version": 4,
+  "rooms_entered": 3,
+  "action_log_seq": 15,
+  "is_resolving": false,
+  "run": {"act": 1, "floor": 6, "ascension": 0},
+  "battle": {
+    "round": 3,
+    "turn": "player",
+    "is_play_phase": false,
+    "enemies": [
+      {
+        "entity_id": "JAW_WORM_0",
+        "combat_id": 42,
+        "name": "Jaw Worm",
+        "alive": true,
+        "hp": 30,
+        "max_hp": 44,
+        "block": 0,
+        "status": [],
+        "intents": [],
+        "move_id": "UNSET_MOVE",
+        "is_stunned": false,
+        "state_log": [],
+        "slot": 0,
+        "ai_fields": {}
+      }
+    ],
+    "allies": [],
+    "history": {"cards_played_this_turn": 1, "cards_played_this_combat": 6}
+  },
+  "hand_select": {
+    "mode": "simple_select",
+    "prompt": "Select a card to Exhaust.",
+    "cards": [
+      {"index": 0, "id": "DEFEND_IRONCLAD", "name": "Defend", "type": "Skill", "cost": "1", "star_cost": null, "description": "Gain 5 Block.", "is_upgraded": false, "keywords": [], "enchantment": null, "affliction": null, "fields": {}},
+      {"index": 1, "id": "STRIKE_IRONCLAD", "name": "Strike", "type": "Attack", "cost": "1", "star_cost": null, "description": "Deal 6 damage.", "is_upgraded": true, "keywords": [], "enchantment": null, "affliction": null, "fields": {}}
+    ],
+    "selected_cards": [],
+    "can_confirm": false
+  },
+  "player": {
+    "character": "IRONCLAD",
+    "hp": 70,
+    "max_hp": 80,
+    "block": 0,
+    "gold": 99,
+    "energy": 1,
+    "max_energy": 3,
+    "hand": [],
+    "draw_pile": [],
+    "discard_pile": [],
+    "exhaust_pile": [],
+    "status": [],
+    "relics": [],
+    "potions": [],
+    "max_potion_slots": 3,
+    "deck_count": 10,
+    "deck": []
+  }
+}

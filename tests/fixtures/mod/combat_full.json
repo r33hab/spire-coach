@@ -1,0 +1,148 @@
+{
+  "state_type": "monster",
+  "mod_version": "0.4.0",
+  "mod_commit": "59260271",
+  "schema_version": 4,
+  "rooms_entered": 3,
+  "action_log_seq": 12,
+  "is_resolving": false,
+  "run": {"act": 1, "floor": 6, "ascension": 3},
+  "battle": {
+    "round": 2,
+    "turn": "player",
+    "is_play_phase": true,
+    "enemies": [
+      {
+        "entity_id": "JAW_WORM_0",
+        "combat_id": 42,
+        "name": "Jaw Worm",
+        "alive": true,
+        "hp": 30,
+        "max_hp": 44,
+        "block": 4,
+        "status": [
+          {"id": "STRENGTH", "name": "Strength", "amount": 3, "type": "Buff", "description": "Increases attack damage by 3.", "keywords": []}
+        ],
+        "intents": [
+          {"type": "Attack", "label": "11", "title": "Attack", "description": "Deals 11 damage.", "damage": 11, "base_damage": 8, "hits": 1}
+        ],
+        "move_id": "CHOMP_MOVE",
+        "move_follow_up_id": "BELLOW_MOVE",
+        "is_stunned": false,
+        "state_log": ["BELLOW_MOVE", "CHOMP_MOVE"],
+        "slot": 0,
+        "ai_fields": {"Anger": true, "BellowStrength": 3}
+      },
+      {
+        "entity_id": "DECIMILLIPEDE_SEGMENT_1",
+        "combat_id": 44,
+        "name": "Decimillipede Segment",
+        "alive": false,
+        "hp": 0,
+        "max_hp": 46,
+        "block": 0,
+        "status": [
+          {"id": "REATTACH", "name": "Reattach", "amount": 1, "type": "Buff", "description": "Will reattach.", "keywords": []}
+        ],
+        "revive": {"in_turns": 2, "power_id": "REATTACH_POWER", "power_name": "Reattach", "hp": 25},
+        "intents": [],
+        "move_id": "DEAD_MOVE",
+        "move_follow_up_id": "REATTACH_MOVE",
+        "is_stunned": false,
+        "state_log": [],
+        "slot": 1,
+        "ai_fields": {}
+      },
+      {
+        "entity_id": "SPHERIC_GUARDIAN_2",
+        "combat_id": 46,
+        "name": "Aggressive Sphere",
+        "alive": false,
+        "hp": 0,
+        "max_hp": 20,
+        "block": 0,
+        "status": [],
+        "intents": [],
+        "move_id": "DEAD_MOVE",
+        "is_stunned": false,
+        "state_log": [],
+        "slot": 2,
+        "ai_fields": {}
+      }
+    ],
+    "allies": [],
+    "history": {
+      "cards_played_this_turn": 2,
+      "attacks_played_this_turn": 1,
+      "skills_played_this_turn": 1,
+      "powers_played_this_turn": 3,
+      "cards_played_this_combat": 9
+    }
+  },
+  "player": {
+    "character": "IRONCLAD",
+    "hp": 61,
+    "max_hp": 80,
+    "block": 5,
+    "gold": 132,
+    "energy": 2,
+    "max_energy": 3,
+    "hand": [
+      {"index": 0, "uid": "c1", "id": "STRIKE_IRONCLAD", "name": "Strike", "type": "Attack", "cost": "1", "star_cost": null, "description": "Deal 6 damage.", "rarity": "Basic", "target_type": "AnyEnemy", "can_play": true, "unplayable_reason": null, "is_upgraded": false, "is_upgradable": true, "upgrade_level": 0, "max_upgrade_level": 1, "keywords": [], "enchantment": {"id": "SHARP", "amount": 3}, "affliction": null, "fields": {}},
+      {"index": 1, "uid": "c2", "id": "WHIRLWIND", "name": "Whirlwind", "type": "Attack", "cost": "X", "star_cost": null, "description": "Deal damage to ALL enemies X times.", "rarity": "Uncommon", "target_type": "AllEnemies", "can_play": true, "unplayable_reason": null, "is_upgraded": false, "is_upgradable": true, "upgrade_level": 0, "max_upgrade_level": 1, "keywords": [], "enchantment": null, "affliction": null, "fields": {}},
+      {"index": 2, "uid": "c3", "id": "ASCENDERS_BANE", "name": "Ascender's Bane", "type": "Curse", "cost": "-2", "star_cost": null, "description": "Unplayable.", "rarity": "Special", "target_type": "None", "can_play": false, "unplayable_reason": "Unplayable", "is_upgraded": false, "is_upgradable": false, "upgrade_level": 0, "max_upgrade_level": 0, "keywords": [], "enchantment": null, "affliction": "BOUND", "fields": {}},
+      {"index": 3, "uid": "c4", "id": "TRUE_GRIT", "name": "True Grit", "type": "Skill", "cost": "0", "star_cost": null, "description": "Gain 7 Block.", "rarity": "Common", "target_type": "Self", "can_play": true, "unplayable_reason": null, "is_upgraded": false, "is_upgradable": true, "upgrade_level": 0, "max_upgrade_level": 1, "keywords": [], "enchantment": null, "affliction": null, "fields": {"cost_this_turn": 0}}
+    ],
+    "draw_pile_count": 5,
+    "discard_pile_count": 2,
+    "exhaust_pile_count": 1,
+    "draw_pile": [
+      {"uid": "c5", "name": "Strike", "cost": "1", "star_cost": null, "description": "Deal 6 damage.", "id": "STRIKE_IRONCLAD", "is_upgraded": true, "upgrade_level": 1, "enchantment": null, "affliction": null, "fields": {}},
+      {"uid": "c6", "name": "Defend", "cost": "1", "star_cost": null, "description": "Gain 5 Block.", "id": "DEFEND_IRONCLAD", "is_upgraded": false, "upgrade_level": 0, "enchantment": null, "affliction": null, "fields": {}},
+      {"uid": "c7", "name": "Defend", "cost": "1", "star_cost": null, "description": "Gain 5 Block.", "id": "DEFEND_IRONCLAD", "is_upgraded": false, "upgrade_level": 0, "enchantment": null, "affliction": null, "fields": {}},
+      {"uid": "c8", "name": "Bash", "cost": "2", "star_cost": null, "description": "Deal 8 damage. Apply 2 Vulnerable.", "id": "BASH", "is_upgraded": false, "upgrade_level": 0, "enchantment": null, "affliction": null, "fields": {}},
+      {"uid": "c9", "name": "Anger", "cost": "0", "star_cost": null, "description": "Deal 6 damage.", "id": "ANGER", "is_upgraded": false, "upgrade_level": 0, "enchantment": null, "affliction": null, "fields": {}}
+    ],
+    "discard_pile": [
+      {"uid": "c10", "name": "Iron Wave", "cost": "1", "star_cost": null, "description": "Gain 5 Block. Deal 5 damage.", "id": "IRON_WAVE", "is_upgraded": false, "upgrade_level": 0, "enchantment": null, "affliction": null, "fields": {}},
+      {"uid": "c11", "name": "Strike", "cost": "1", "star_cost": null, "description": "Deal 6 damage.", "id": "STRIKE_IRONCLAD", "is_upgraded": false, "upgrade_level": 0, "enchantment": {"id": "NIMBLE", "amount": 2}, "affliction": null, "fields": {}}
+    ],
+    "exhaust_pile": [
+      {"uid": "c12", "name": "True Grit", "cost": "1", "star_cost": null, "description": "Gain 7 Block.", "id": "TRUE_GRIT", "is_upgraded": false, "upgrade_level": 0, "enchantment": null, "affliction": null, "fields": {}}
+    ],
+    "hand_ordered": [
+      {"id": "STRIKE_IRONCLAD", "is_upgraded": false, "uid": "c1"},
+      {"id": "WHIRLWIND", "is_upgraded": false, "uid": "c2"},
+      {"id": "ASCENDERS_BANE", "is_upgraded": false, "uid": "c3"},
+      {"id": "TRUE_GRIT", "is_upgraded": false, "uid": "c4"}
+    ],
+    "discard_pile_ordered": [
+      {"id": "STRIKE_IRONCLAD", "is_upgraded": false, "uid": "c11"},
+      {"id": "IRON_WAVE", "is_upgraded": false, "uid": "c10"}
+    ],
+    "exhaust_pile_ordered": [
+      {"id": "TRUE_GRIT", "is_upgraded": false, "uid": "c12"}
+    ],
+    "draw_pile_ordered": [
+      {"id": "BASH", "is_upgraded": false, "uid": "c8"},
+      {"id": "ANGER", "is_upgraded": false, "uid": "c9"},
+      {"id": "DEFEND_IRONCLAD", "is_upgraded": false, "uid": "c6"},
+      {"id": "STRIKE_IRONCLAD", "is_upgraded": true, "uid": "c5"},
+      {"id": "DEFEND_IRONCLAD", "is_upgraded": false, "uid": "c7"}
+    ],
+    "status": [
+      {"id": "STRENGTH", "name": "Strength", "amount": 2, "type": "Buff", "description": "Increases attack damage by 2.", "keywords": []}
+    ],
+    "relics": [
+      {"id": "BURNING_BLOOD", "name": "Burning Blood", "description": "At the end of combat, heal 6 HP.", "counter": null, "keywords": [], "status": "Normal", "is_used_up": false, "stack_count": 1, "saved": null, "fields": {}},
+      {"id": "KUNAI", "name": "Kunai", "description": "Every 3 Attacks in a single turn, gain 1 Dexterity.", "counter": 2, "keywords": [], "status": "Normal", "is_used_up": false, "stack_count": 1, "saved": null, "fields": {"_isActivating": false, "_attacksPlayedThisTurn": 2}},
+      {"id": "PEN_NIB", "name": "Pen Nib", "description": "Every 10th Attack you play deals double damage.", "counter": 9, "keywords": [], "status": "Normal", "is_used_up": false, "stack_count": 1, "saved": {"AttacksPlayed": 19}, "fields": {}}
+    ],
+    "potions": [
+      {"id": "FIRE_POTION", "name": "Fire Potion", "description": "Deal 20 damage.", "slot": 1, "can_use_in_combat": true, "target_type": "AnyEnemy", "keywords": []}
+    ],
+    "max_potion_slots": 3,
+    "deck_count": 12,
+    "deck": []
+  }
+}
