@@ -15,9 +15,14 @@ card uids (`play_card`) or the potion slot (`use_potion`) plus the entry's
 target -- never the search's own best-target guess, so a card played on the
 wrong enemy is graded against the child for that target, not the best
 one. `grade_selection` does the same job for an in-combat selection
-(hand/grid/choose-a-card), which the mod does not log as an action: the
-chosen candidate is found by diffing which one left the hand or a pile
-between two live snapshots.
+(hand/grid/choose-a-card, or a skip), which the mod does not log as an
+action: a hand/grid pick is found by diffing which candidate left the hand
+or a pile between two live snapshots; a choose-a-card pick, whose freshly
+generated candidates never sat in a pile beforehand, by which new card
+arrived in the hand instead, matched by (id, upgraded) since the dealt card
+is a new instance; a skip, when neither happens and the selection allows
+one, by the analysis's own `skip` move. The engine analyzes both
+choose-a-card picks and skips, so both are graded (controller ruling).
 """
 
 from __future__ import annotations
@@ -236,20 +241,89 @@ def _departed_candidate_index(
     return departed[0] if len(departed) == 1 else None
 
 
+def _select_child(indices: list[int], analysis: Analysis) -> MoveStat | None:
+    """The analyzed "select" child at any of these candidate indices.
+
+    A caller may pass several tied indices (identical merged CHOOSE
+    candidates): the search keeps only one of them as the merged child's own
+    `select_index`, so every tied index is searched and whichever one is
+    actually present wins.
+    """
+    return next(
+        (m for m in analysis.moves if m.kind == "select" and m.select_index in indices), None
+    )
+
+
+def _new_hand_cards(pre_live: dict, post_live: dict) -> list[dict]:
+    """Post-state hand cards whose uid was not present in the pre-state hand."""
+    pre_uids = {card.get("uid") for card in (pre_live.get("hand") or [])}
+    return [card for card in (post_live.get("hand") or []) if card.get("uid") not in pre_uids]
+
+
+def _matching_candidate_indices(card: dict, candidates: list[dict]) -> list[int]:
+    return [
+        index
+        for index, candidate in enumerate(candidates)
+        if candidate.get("id") == card.get("id")
+        and candidate.get("upgraded") == card.get("upgraded")
+    ]
+
+
+_AMBIGUOUS = object()  # sentinel: more than one new hand card matched a candidate
+
+
+def _choose_pick_indices(pre_live: dict, post_live: dict, candidates: list[dict]):
+    """The tied candidate indices for a CHOOSE pick, `_AMBIGUOUS`, or None (no pick).
+
+    A CHOOSE candidate is freshly generated, never held anywhere beforehand,
+    so it cannot be identified by a departure like HAND/GRID: instead, the
+    pick is the new card that lands in the post-state hand, matched to a
+    candidate by (id, upgraded) rather than uid (the dealt card is a new
+    instance, not the candidate's own placeholder). When several candidates
+    share an id, any of their indices names the same merged child, so all
+    tied indices are returned together. More than one new card matching some
+    candidate is ambiguous.
+    """
+    matches = [
+        _matching_candidate_indices(card, candidates)
+        for card in _new_hand_cards(pre_live, post_live)
+    ]
+    matches = [indices for indices in matches if indices]
+    if not matches:
+        return None
+    if len(matches) > 1:
+        return _AMBIGUOUS
+    return matches[0]
+
+
 def grade_selection(pre_live: dict, post_live: dict, analysis: Analysis) -> Grade | None:
-    """Grade an in-combat selection, identified by diffing pre/post hand and piles."""
+    """Grade an in-combat selection: hand/grid, choose-a-card, or a skip.
+
+    A hand/grid pick is identified by a candidate departing the hand or a
+    pile; a choose-a-card pick by a new, matching card arriving in the hand;
+    a skip (when `can_skip` and neither happens) by the analysis's own
+    `skip` move.
+    """
     pending = pre_live.get("pending_selection")
     if not pending:
         return None
-
     candidates = pending.get("candidates") or []
-    index = _departed_candidate_index(pre_live, post_live, candidates)
-    if index is None:
-        return None
 
-    stat = next(
-        (m for m in analysis.moves if m.kind == "select" and m.select_index == index), None
-    )
-    if stat is None:
+    departed_index = _departed_candidate_index(pre_live, post_live, candidates)
+    if departed_index is not None:
+        stat = _select_child([departed_index], analysis)
+        return grade(stat, analysis) if stat is not None else None
+
+    choose_indices = _choose_pick_indices(pre_live, post_live, candidates)
+    if choose_indices is _AMBIGUOUS:
         return None
-    return grade(stat, analysis)
+    if choose_indices is not None:
+        stat = _select_child(choose_indices, analysis)
+        return grade(stat, analysis) if stat is not None else None
+
+    if pending.get("can_skip"):
+        skip_stat = next((m for m in analysis.moves if m.kind == "skip"), None)
+        if skip_stat is not None:
+            return grade(skip_stat, analysis)
+
+    return None

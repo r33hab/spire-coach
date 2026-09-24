@@ -7,6 +7,7 @@ from coach.grader import (
     DEFAULT_THRESHOLDS,
     Grade,
     Thresholds,
+    _departed_candidate_index,
     grade,
     grade_selection,
     identify_move,
@@ -593,7 +594,8 @@ def test_grade_selection_returns_none_when_no_candidate_can_be_identified():
             "can_skip": True,
         },
     }
-    # Nothing changed: the player skipped the selection.
+    # Nothing changed: the player skipped the selection. can_skip is true, but
+    # this analysis has no "skip" MoveStat either, so there is nothing to grade.
     post_live = {
         "hand": [candidate_a],
         "draw_pile": [],
@@ -601,5 +603,169 @@ def test_grade_selection_returns_none_when_no_candidate_can_be_identified():
         "exhaust_pile": [],
     }
     analysis = make_analysis([make_stat(kind="select", select_index=0)], best=OTHER_BEST)
+
+    assert grade_selection(pre_live, post_live, analysis) is None
+
+
+def test_departed_candidate_index_returns_none_when_more_than_one_candidate_departed():
+    # Review Minor: _departed_candidate_index itself must not guess between two
+    # simultaneous departures -- ambiguous, so no index is returned at all.
+    candidate_a = make_card("c-a")
+    candidate_b = make_card("c-b")
+    pre_live = {
+        "hand": [candidate_a, candidate_b],
+        "draw_pile": [],
+        "discard_pile": [],
+        "exhaust_pile": [],
+    }
+    post_live = {"hand": [], "draw_pile": [], "discard_pile": [], "exhaust_pile": []}
+
+    result = _departed_candidate_index(pre_live, post_live, [candidate_a, candidate_b])
+
+    assert result is None
+
+
+# --- grade_selection: choose-a-card picks and skips (controller ruling) ------
+
+
+def test_grade_selection_choose_pick_matches_the_new_hand_card_by_id_and_upgraded():
+    existing = make_card("hand-1", card_id="DEFEND_IRONCLAD")
+    # Two candidates share an id/upgraded pair (a generated duplicate); either
+    # index names the same merged child, so the search may have kept either
+    # one as that child's own select_index (here, index 1, not 0).
+    candidate_strike_1 = make_card("gen-a", card_id="STRIKE_IRONCLAD")
+    candidate_strike_2 = make_card("gen-b", card_id="STRIKE_IRONCLAD")
+    candidate_bash = make_card("gen-c", card_id="BASH_IRONCLAD")
+    pre_live = {
+        "hand": [existing],
+        "draw_pile": [],
+        "discard_pile": [],
+        "exhaust_pile": [],
+        "pending_selection": {
+            "kind": "CHOOSE",
+            "candidates": [candidate_strike_1, candidate_strike_2, candidate_bash],
+            "min": 1,
+            "max": 1,
+            "can_skip": True,
+        },
+    }
+    # The chosen card is dealt into the hand as a brand new instance (a new
+    # uid) -- CHOOSE candidates are matched by (id, upgraded), never by uid.
+    new_strike = make_card("new-instance-uid", card_id="STRIKE_IRONCLAD")
+    post_live = {
+        "hand": [existing, new_strike],
+        "draw_pile": [],
+        "discard_pile": [],
+        "exhaust_pile": [],
+    }
+    pick_strike = make_stat(
+        kind="select",
+        card_index=None,
+        card_uid=None,
+        card_id=None,
+        target=None,
+        select_index=1,  # the merged child kept index 1, not 0
+        hand_indices=[],
+        label="Choose Strike",
+    )
+    pick_bash = make_stat(
+        kind="select",
+        card_index=None,
+        card_uid=None,
+        card_id=None,
+        target=None,
+        select_index=2,
+        hand_indices=[],
+        label="Choose Bash",
+    )
+    analysis = make_analysis([pick_strike, pick_bash], best=OTHER_BEST)
+
+    result = grade_selection(pre_live, post_live, analysis)
+
+    assert result is not None
+    assert result.played is pick_strike
+
+
+def test_grade_selection_choose_skip_maps_to_the_skip_move_when_nothing_is_taken():
+    candidate_a = make_card("gen-a", card_id="STRIKE_IRONCLAD")
+    candidate_b = make_card("gen-b", card_id="BASH_IRONCLAD")
+    pre_live = {
+        "hand": [],
+        "draw_pile": [],
+        "discard_pile": [],
+        "exhaust_pile": [],
+        "pending_selection": {
+            "kind": "CHOOSE",
+            "candidates": [candidate_a, candidate_b],
+            "min": 0,
+            "max": 1,
+            "can_skip": True,
+        },
+    }
+    post_live = {"hand": [], "draw_pile": [], "discard_pile": [], "exhaust_pile": []}  # unchanged
+    skip_stat = make_stat(
+        kind="skip",
+        card_index=None,
+        card_uid=None,
+        card_id=None,
+        target=None,
+        select_index=None,
+        hand_indices=[],
+        label="Skip",
+    )
+    analysis = make_analysis([skip_stat], best=OTHER_BEST)
+
+    result = grade_selection(pre_live, post_live, analysis)
+
+    assert result is not None
+    assert result.played is skip_stat
+
+
+def test_grade_selection_choose_returns_none_when_more_than_one_new_matching_card_appears():
+    candidate_a = make_card("gen-a", card_id="STRIKE_IRONCLAD")
+    candidate_b = make_card("gen-b", card_id="BASH_IRONCLAD")
+    pre_live = {
+        "hand": [],
+        "draw_pile": [],
+        "discard_pile": [],
+        "exhaust_pile": [],
+        "pending_selection": {
+            "kind": "CHOOSE",
+            "candidates": [candidate_a, candidate_b],
+            "min": 1,
+            "max": 1,
+            "can_skip": False,
+        },
+    }
+    # Two new cards appear, each matching a different candidate: which one was
+    # actually picked (e.g. the other arriving via an unrelated draw) cannot
+    # be told apart, so this must not be graded as either.
+    new_strike = make_card("new-1", card_id="STRIKE_IRONCLAD")
+    new_bash = make_card("new-2", card_id="BASH_IRONCLAD")
+    post_live = {
+        "hand": [new_strike, new_bash],
+        "draw_pile": [],
+        "discard_pile": [],
+        "exhaust_pile": [],
+    }
+    pick_strike = make_stat(
+        kind="select",
+        card_index=None,
+        card_uid=None,
+        card_id=None,
+        target=None,
+        select_index=0,
+        hand_indices=[],
+    )
+    pick_bash = make_stat(
+        kind="select",
+        card_index=None,
+        card_uid=None,
+        card_id=None,
+        target=None,
+        select_index=1,
+        hand_indices=[],
+    )
+    analysis = make_analysis([pick_strike, pick_bash], best=OTHER_BEST)
 
     assert grade_selection(pre_live, post_live, analysis) is None
