@@ -91,13 +91,22 @@ Adapter rule for the coach (`coach/snapshot.py`): translate whatever raw per-car
 
 ```jsonc
 {
-  "kind": "EXHAUST",            // game selection kind as reported by the mod (hand_select prompt type)
-  "source_card": "BURNING_PACT",
-  "candidates": [Card],         // selectable cards in on-screen order
+  "kind": "HAND",               // "HAND": pick from the hand (mod hand_select)
+                                // "GRID": pick from a pile (mod card_select grid)
+                                // "CHOOSE": pick one of freshly generated cards (mod choose-a-card)
+  "pile": null,                 // GRID only: "DRAW" | "DISCARD" | "EXHAUST"; null otherwise or when unknown
+  "prompt_key": null,           // the game's localization KEY of the prompt (locale-independent); null if unknown
+  "source_card": "BURNING_PACT",// id of the card whose effect opened the selection; null if not a card or unknown
+  "source_potion": null,        // id of the potion that opened it, else null
+  "source_relic": null,         // id of the relic that opened it, else null
+  "candidates": [Card],         // selectable cards in on-screen order (generated cards for CHOOSE)
   "min": 1, "max": 1,
+  "can_skip": false,            // the screen offers a skip / confirm-with-none
   "selected_uids": []           // already toggled, if the mod reports it
 }
 ```
+
+Amended 2026-09-24 (ledger ruling, stage0 Task 11 findings). The mod reports in-combat hand, grid and choose-a-card overlays with the battle block, the selection's source, min/max and prompt key (mod Task 6c), and the coach's builder fills this object from them (coach Task 11b). `kind` is the SCREEN SHAPE, not a game enum: the game has no selection-kind enum. The converter derives the emulator's `CardSelectionKind` from `source_*` plus `kind`/`pile`, and warns when it cannot.
 
 ---
 
