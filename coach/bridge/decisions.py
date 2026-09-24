@@ -111,23 +111,23 @@ class Stabilizer:
     def __init__(self) -> None:
         self._streak_fingerprint: str | None = None
         self._streak_count = 0
-        self._last_emitted: str | None = None
+        self._emitted_current_streak = False
 
     def feed(self, state: dict) -> dict | None:
         current = fingerprint(state) if is_settled(state) else None
 
-        if current is not None and current == self._streak_fingerprint:
-            self._streak_count += 1
-        else:
+        if current != self._streak_fingerprint:
             self._streak_fingerprint = current
-            self._streak_count = 1 if current is not None else 0
+            self._streak_count = 0
+            self._emitted_current_streak = False
 
         if current is None:
-            self._last_emitted = None
             return None
 
-        if self._streak_count >= 2 and current != self._last_emitted:
-            self._last_emitted = current
+        self._streak_count += 1
+
+        if self._streak_count >= 2 and not self._emitted_current_streak:
+            self._emitted_current_streak = True
             return state
 
         return None

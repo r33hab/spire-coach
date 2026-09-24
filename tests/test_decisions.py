@@ -295,3 +295,25 @@ def test_stabilizer_resets_on_an_unsettled_poll_between_settled_ones(monster_sta
     # Settling back to the very same position needs two fresh consecutive polls.
     assert stabilizer.feed(copy.deepcopy(monster_state)) is None
     assert stabilizer.feed(copy.deepcopy(monster_state)) == monster_state
+
+
+def test_stabilizer_re_emits_a_position_once_it_re_settles_after_a_different_one(monster_state):
+    # A, A, B, A, A: A stabilizes and emits on the 2nd feed; B is only seen once
+    # (no emission); A re-stabilizes and must emit again on the 5th feed, not
+    # get silently withheld because it was already emitted earlier.
+    stabilizer = Stabilizer()
+    a = monster_state
+    b = copy.deepcopy(monster_state)
+    b["player"]["hp"] -= 1
+
+    assert stabilizer.feed(copy.deepcopy(a)) is None
+    assert stabilizer.feed(copy.deepcopy(a)) == a
+    assert stabilizer.feed(copy.deepcopy(b)) is None
+    assert stabilizer.feed(copy.deepcopy(a)) is None
+    assert stabilizer.feed(copy.deepcopy(a)) == a
+
+
+def test_stabilizer_emits_only_once_across_a_long_unbroken_streak(monster_state):
+    stabilizer = Stabilizer()
+    results = [stabilizer.feed(copy.deepcopy(monster_state)) for _ in range(4)]
+    assert results == [None, monster_state, None, None]
