@@ -83,7 +83,7 @@ def test_unsettled_state_is_not_logged(resolving_state, tmp_path):
 
     stats = capture_loop(client, log, poll_interval_s=0, stop=never_stop, sleep=lambda s: None)
 
-    assert stats == CaptureStats(records=0, actions=0, errors=1)
+    assert stats == CaptureStats(records=0, actions=0, errors=1, error_message="token rejected: x")
     assert read_records(log) == []
 
 
@@ -102,7 +102,9 @@ def test_settled_state_is_logged_once_after_two_identical_polls(settled_state, t
 
     stats = capture_loop(client, log, poll_interval_s=0, stop=never_stop, sleep=lambda s: None)
 
-    assert stats == CaptureStats(records=1, actions=0, errors=1)
+    assert stats == CaptureStats(
+        records=1, actions=0, errors=1, error_message="token rejected: x"
+    )
     records = read_records(log)
     assert len(records) == 1
     assert records[0]["kind"] == "state"
@@ -162,6 +164,97 @@ def test_state_record_stamps_a_version_mismatch_but_still_records(
     assert any("v0.999.0" in problem for problem in versions["problems"])
 
 
+# --- version mismatch: capture warns loudly, but keeps recording (Review Focus #4) --
+
+
+def _shift(state, delta):
+    """A distinct settled position (different fingerprint) for the Stabilizer."""
+    other = copy.deepcopy(state)
+    other["player"]["hp"] -= delta
+    return other
+
+
+def test_version_mismatch_warns_once_at_onset_and_stays_silent_while_persisting(
+    settled_state, tmp_path, monkeypatch
+):
+    state_a, state_b = settled_state, _shift(settled_state, 1)
+    versions = iter(["v0.108.0", "v0.108.0"])
+    monkeypatch.setattr("coach.capture.read_game_version", lambda: next(versions))
+
+    client = FakeClient(
+        [
+            copy.deepcopy(state_a), copy.deepcopy(state_a),  # emits #1: onset -> warns
+            copy.deepcopy(state_b), copy.deepcopy(state_b),  # emits #2: same mismatch -> silent
+            BridgeAuthError("x"),
+        ]
+    )
+    log = make_log(tmp_path)
+    messages = []
+
+    stats = capture_loop(
+        client, log, poll_interval_s=0, stop=never_stop, sleep=lambda s: None, out=messages.append
+    )
+
+    assert stats.records == 2  # capture keeps recording despite the mismatch
+    warnings = [m for m in messages if m.startswith("⚠")]
+    assert len(warnings) == 1
+    assert "v0.108.0" in warnings[0]
+    assert "v0.107.1" in warnings[0]
+    assert all(r["payload"]["versions"]["ok"] is False for r in read_records(log))
+
+
+def test_version_mismatch_re_warns_when_the_problem_changes(settled_state, tmp_path, monkeypatch):
+    state_a, state_b = settled_state, _shift(settled_state, 1)
+    versions = iter(["v0.108.0", "v0.999.0"])
+    monkeypatch.setattr("coach.capture.read_game_version", lambda: next(versions))
+
+    client = FakeClient(
+        [
+            copy.deepcopy(state_a), copy.deepcopy(state_a),  # onset: v0.108.0 -> warns
+            copy.deepcopy(state_b), copy.deepcopy(state_b),  # changes: v0.999.0 -> warns again
+            BridgeAuthError("x"),
+        ]
+    )
+    log = make_log(tmp_path)
+    messages = []
+
+    capture_loop(
+        client, log, poll_interval_s=0, stop=never_stop, sleep=lambda s: None, out=messages.append
+    )
+
+    warnings = [m for m in messages if m.startswith("⚠")]
+    assert len(warnings) == 2
+    assert "v0.108.0" in warnings[0]
+    assert "v0.999.0" in warnings[1]
+
+
+def test_version_mismatch_re_warns_after_clearing(settled_state, tmp_path, monkeypatch):
+    state_a, state_b, state_c = settled_state, _shift(settled_state, 1), _shift(settled_state, 2)
+    versions = iter(["v0.108.0", "v0.107.1", "v0.108.0"])
+    monkeypatch.setattr("coach.capture.read_game_version", lambda: next(versions))
+
+    client = FakeClient(
+        [
+            copy.deepcopy(state_a), copy.deepcopy(state_a),  # mismatch -> warns
+            copy.deepcopy(state_b), copy.deepcopy(state_b),  # matches -> clears, silent
+            copy.deepcopy(state_c), copy.deepcopy(state_c),  # same mismatch again -> warns again
+            BridgeAuthError("x"),
+        ]
+    )
+    log = make_log(tmp_path)
+    messages = []
+
+    stats = capture_loop(
+        client, log, poll_interval_s=0, stop=never_stop, sleep=lambda s: None, out=messages.append
+    )
+
+    assert stats.records == 3
+    warnings = [m for m in messages if m.startswith("⚠")]
+    assert len(warnings) == 2  # not suppressed the 2nd time: it cleared in between
+    assert "v0.108.0" in warnings[0]
+    assert "v0.108.0" in warnings[1]
+
+
 # --- actions_since --------------------------------------------------------------
 
 
@@ -212,7 +305,7 @@ def test_bridge_unavailable_prints_waiting_once_then_reconnects(settled_state, t
     messages = []
     sleeps = []
 
-    capture_loop(
+    stats = capture_loop(
         client,
         log,
         poll_interval_s=0,
@@ -221,7 +314,11 @@ def test_bridge_unavailable_prints_waiting_once_then_reconnects(settled_state, t
         out=messages.append,
     )
 
-    assert messages == ["waiting for game…", "game connected", "token rejected: x"]
+    # The routine status pair goes through `out`; the terminal auth error does
+    # not (it comes back via CaptureStats.error_message instead — see the
+    # error_message tests below), so `out` never carries it twice.
+    assert messages == ["waiting for game…", "game connected"]
+    assert stats.error_message == "token rejected: x"
     # Two outage retries, each a 1s sleep; no poll_interval_s sleep between them.
     assert sleeps.count(1) == 2
 
@@ -240,7 +337,7 @@ def test_bridge_unavailable_never_raises_out_of_the_loop(resolving_state, tmp_pa
 # --- BridgeAuthError: stop immediately, count an error -----------------------
 
 
-def test_auth_error_prints_the_message_and_stops_with_an_error_counted(tmp_path):
+def test_auth_error_is_returned_as_error_message_and_stops_with_an_error_counted(tmp_path):
     client = FakeClient([BridgeAuthError("token rejected: reinstall the mod")])
     log = make_log(tmp_path)
     messages = []
@@ -249,8 +346,12 @@ def test_auth_error_prints_the_message_and_stops_with_an_error_counted(tmp_path)
         client, log, poll_interval_s=0, stop=never_stop, sleep=lambda s: None, out=messages.append
     )
 
-    assert stats == CaptureStats(records=0, actions=0, errors=1)
-    assert messages == ["token rejected: reinstall the mod"]
+    assert stats == CaptureStats(
+        records=0, actions=0, errors=1, error_message="token rejected: reinstall the mod"
+    )
+    # Not printed via `out`: capture_loop hands it back for the caller to route
+    # (the CLI puts it on stderr; see tests/test_cli.py).
+    assert messages == []
     assert read_records(log) == []
 
 
@@ -291,12 +392,10 @@ def test_full_scenario_resolving_then_settled_twice_then_unavailable_then_back_t
         client, log, poll_interval_s=0, stop=never_stop, sleep=lambda s: None, out=messages.append
     )
 
-    assert stats == CaptureStats(records=1, actions=0, errors=1)
+    assert stats == CaptureStats(
+        records=1, actions=0, errors=1, error_message="token rejected: reinstall the mod"
+    )
     records = read_records(log)
     assert len(records) == 1
     assert records[0]["kind"] == "state"
-    assert messages == [
-        "waiting for game…",
-        "game connected",
-        "token rejected: reinstall the mod",
-    ]
+    assert messages == ["waiting for game…", "game connected"]

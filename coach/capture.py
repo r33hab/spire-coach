@@ -4,7 +4,9 @@ Runs until `stop()` says otherwise. A lost connection to the game/mod never
 crashes the loop: it prints one "waiting" message, retries once a second,
 and prints one "reconnected" message when the mod answers again. A rejected
 token is different: it can't recover on its own, so the loop stops and
-reports it.
+reports it — via the returned CaptureStats, not `out`, so the CLI is free to
+route routine status text (stdout) and a terminal error's text (stderr)
+differently without printing the same line twice.
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ class CaptureStats:
     records: int
     actions: int
     errors: int
+    error_message: str | None = None
 
 
 def capture_loop(
@@ -42,6 +45,7 @@ def capture_loop(
     records = actions = errors = 0
     last_seq = 0
     waiting_for_game = False
+    warned_problems: tuple[str, ...] | None = None
 
     while not stop():
         try:
@@ -50,6 +54,13 @@ def capture_loop(
             if stabilized is not None:
                 decision = classify(stabilized)
                 versions = check_versions(read_game_version(), stabilized)
+                if not versions.ok:
+                    problems = tuple(versions.problems)
+                    if problems != warned_problems:
+                        out(f"⚠ version mismatch: {'; '.join(problems)}; records are stamped")
+                        warned_problems = problems
+                else:
+                    warned_problems = None
                 log.append(
                     "state",
                     {
@@ -70,9 +81,10 @@ def capture_loop(
                 log.append("action", entry)
                 actions += 1
         except BridgeAuthError as exc:
-            out(str(exc))
             errors += 1
-            return CaptureStats(records=records, actions=actions, errors=errors)
+            return CaptureStats(
+                records=records, actions=actions, errors=errors, error_message=str(exc)
+            )
         except BridgeUnavailable:
             if not waiting_for_game:
                 out(_WAITING_MESSAGE)

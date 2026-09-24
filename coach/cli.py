@@ -133,7 +133,14 @@ def _doctor_checks(
     else:
         checks.append((False, "✗ game is running: Slay the Spire 2 is not running"))
 
-    client = client_factory(config.base_url, config.token)
+    try:
+        client = client_factory(config.base_url, config.token)
+    except Exception as exc:
+        checks.append((False, f"✗ hello reachable: could not create a client: {exc}"))
+        checks.append((False, "✗ auth accepted: not checked (hello unreachable)"))
+        checks.append((False, "✗ versions ok: not checked (hello unreachable)"))
+        return checks
+
     try:
         try:
             client.hello()
@@ -208,6 +215,8 @@ def cmd_capture(config: Config) -> int:
     finally:
         client.close()
     print(f"captured {stats.records} state(s), {stats.actions} action(s)")
+    if stats.error_message:
+        print(stats.error_message, file=sys.stderr)
     return 2 if stats.errors else 0
 
 

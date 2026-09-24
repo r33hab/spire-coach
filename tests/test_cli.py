@@ -457,6 +457,50 @@ def test_cmd_doctor_prints_x_lines_and_exits_1_when_a_check_fails(tmp_path, caps
     assert sum(line.startswith("✓") for line in out_lines) == 8
 
 
+def test_doctor_survives_client_factory_itself_raising(tmp_path):
+    # A bad SPIRE_COACH_BASE_URL makes the real ModClient's constructor raise
+    # ValueError. That must not abort the whole doctor run: the first 6 checks
+    # (computed before any client is built) still run and print, and the last
+    # 3 become clear ✗ lines instead of an uncaught exception. Uses the real
+    # default client_factory (ModClient) on purpose, not a fake.
+    config = make_config(tmp_path, base_url="http://example.com:15526")
+
+    checks = cli._doctor_checks(
+        config,
+        game_dir=tmp_path,
+        release_info=FIXTURES / "release_info.json",
+        save_root=tmp_path / "no-saves",
+        is_running=never_running,
+    )
+
+    assert len(checks) == 9
+    lines = [line for _, line in checks]
+    assert lines[0] == "✓ game dir exists"  # earlier checks still ran
+    assert any(
+        line.startswith("✗ hello reachable: could not create a client") for line in lines
+    )
+    assert lines[-2] == "✗ auth accepted: not checked (hello unreachable)"
+    assert lines[-1] == "✗ versions ok: not checked (hello unreachable)"
+    assert not all(ok for ok, _ in checks)
+
+
+def test_cmd_doctor_survives_client_factory_itself_raising_and_exits_1(tmp_path, capsys):
+    config = make_config(tmp_path, base_url="http://example.com:15526")
+
+    result = cli.cmd_doctor(
+        config,
+        game_dir=tmp_path,
+        release_info=FIXTURES / "release_info.json",
+        save_root=tmp_path / "no-saves",
+        is_running=never_running,
+    )
+
+    out_lines = capsys.readouterr().out.splitlines()
+    assert result == 1
+    assert len(out_lines) == 9
+    assert "Traceback" not in "\n".join(out_lines)
+
+
 # --- addendum: one-line errors at the CLI boundary, never a traceback --------
 
 
@@ -505,13 +549,58 @@ def test_capture_auth_error_via_stats_exits_2_without_raising(monkeypatch, tmp_p
     monkeypatch.setenv("SPIRE_COACH_MODS_DIR", str(tmp_path / "mods"))
     monkeypatch.setenv("SPIRE_COACH_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setattr(
-        cli, "capture_loop", lambda *a, **k: CaptureStats(records=3, actions=1, errors=1)
+        cli,
+        "capture_loop",
+        lambda *a, **k: CaptureStats(
+            records=3, actions=1, errors=1, error_message="token rejected: x"
+        ),
     )
 
     result = cli.main(["capture"])
 
+    captured = capsys.readouterr()
     assert result == 2
-    assert "Traceback" not in capsys.readouterr().err
+    assert captured.err.strip() == "token rejected: x"
+    assert "token rejected: x" not in captured.out
+    assert "Traceback" not in captured.err
+
+
+class FakeAuthFailingClient:
+    """A minimal ModClient stand-in whose first get_state() rejects the token."""
+
+    def __init__(self):
+        self.closed = False
+
+    def get_state(self):
+        raise BridgeAuthError("token rejected: reinstall the mod or check STS2_MCP.conf")
+
+    def actions_since(self, since):
+        return {"status": "ok", "latest_seq": since, "entries": []}
+
+    def close(self):
+        self.closed = True
+
+
+def test_capture_auth_error_through_the_real_capture_loop_goes_to_stderr_not_stdout(
+    monkeypatch, tmp_path, capsys
+):
+    # Exercises the REAL capture_loop (not monkeypatched) through cmd_capture/main,
+    # only faking the ModClient it talks to -- proves the addendum's stderr rule
+    # holds on the realistic path, not just the defensive uncaught-exception path
+    # covered by test_bridge_auth_error_at_the_boundary_is_one_line_and_exit_2 above.
+    monkeypatch.setenv("SPIRE_COACH_MODS_DIR", str(tmp_path / "mods"))
+    monkeypatch.setenv("SPIRE_COACH_DATA_DIR", str(tmp_path / "data"))
+    fake_client = FakeAuthFailingClient()
+    monkeypatch.setattr(cli, "ModClient", lambda base_url, token: fake_client)
+
+    result = cli.main(["capture"])
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert "token rejected: reinstall the mod or check STS2_MCP.conf" in captured.err
+    assert "token rejected" not in captured.out
+    assert "Traceback" not in captured.err
+    assert fake_client.closed is True
 
 
 def test_bridge_unavailable_at_the_boundary_is_one_line_and_exit_1(monkeypatch, tmp_path, capsys):
