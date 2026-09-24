@@ -42,7 +42,7 @@ JSON. Strings use the game's `ModelId.Entry` form in UPPER_SNAKE_CASE with no ca
     "max_potion_slots": 3
   },
   "hand": [Card],                       // in hand order, left to right
-  "draw_pile": [Card],                  // UNORDERED multiset (sorted by id for stability)
+  "draw_pile": [Card],                  // UNORDERED multiset of the WHOLE draw pile, including any known_draw_* cards (sorted by id for stability)
   "discard_pile": [Card],               // in pile order
   "exhaust_pile": [Card],
   "known_draw_top": [Card],             // cards the player knowingly placed on top, top first; default []
@@ -58,10 +58,14 @@ JSON. Strings use the game's `ModelId.Entry` form in UPPER_SNAKE_CASE with no ca
     "state_log": ["CHOMP"],             // MonsterMoveStateMachine.StateLog ids, oldest first (includes branch states)
     "ai_fields": {}                     // primitive instance fields of the concrete monster class, by field name
   }],
-  "history": {                          // per-combat/turn counters the game shows or the mod reports; missing = unknown
+  "history": {                          // ONLY these 7 keys are accepted (the converter rejects others); a missing key = unknown
     "cards_played_this_turn": 0,
     "cards_played_this_combat": 0,
-    "cards_drawn_this_combat": 5
+    "cards_drawn_this_combat": 5,
+    "cards_generated_this_combat": 0,
+    "lightning_orbs_channeled_this_combat": 0,
+    "attacks_played_this_turn": 0,
+    "skills_played_this_turn": 0
   },
   "pending_selection": null             // see 1.1
 }
@@ -77,9 +81,11 @@ JSON. Strings use the game's `ModelId.Entry` form in UPPER_SNAKE_CASE with no ca
   "cost": 1,                    // current displayed cost, null for unplayable/X
   "enchantment": null,          // game enchantment id string, e.g. "SHARP"
   "enchant_amount": null,
-  "fields": {}                  // primitive instance fields of the card object that differ from a fresh copy (e.g. cost-this-turn/combat overrides)
+  "fields": {}                  // ONLY "cost_this_turn" / "cost_for_combat" (int, ABSOLUTE game energy cost) are understood; other keys produce a converter warning
 }
 ```
+
+Adapter rule for the coach (`coach/snapshot.py`): translate whatever raw per-card cost-override fields the mod reports into these two keys, and pass through only the 7 `history` keys above, dropping any other mod history key (e.g. `powers_played_this_turn`).
 
 ### 1.1 Pending in-combat selection
 
