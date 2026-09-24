@@ -33,9 +33,16 @@ def game_is_running() -> bool:
     return result.returncode == 0
 
 
-def _refuse_if_running(is_running: Callable[[], bool]) -> None:
+def _refuse_if_running(
+    is_running: Callable[[], bool], error_cls: type[Exception] = SaveError
+) -> None:
+    """Shared game-running guard for coach.saves and coach.modinstall.
+
+    Each module raises its own exception type with the identical message, so
+    callers keep catching the exception class they always have.
+    """
     if is_running():
-        raise SaveError("Slay the Spire 2 is running; close the game first")
+        raise error_cls("Slay the Spire 2 is running; close the game first")
 
 
 def _stamp(now: datetime | None) -> str:

@@ -202,6 +202,14 @@ def test_403_from_the_origin_guard_raises_bridge_auth_error_with_the_server_mess
         make_client(handler).get_state()
 
 
+def test_403_with_no_server_message_falls_back_to_a_message_naming_the_remedy():
+    def handler(request):
+        return json_response(403, {"status": "error"})
+
+    with pytest.raises(BridgeAuthError, match="no Origin header is sent"):
+        make_client(handler).get_state()
+
+
 def test_connect_error_raises_bridge_unavailable():
     def handler(request):
         raise httpx.ConnectError("Connection refused", request=request)
@@ -232,6 +240,27 @@ def test_non_json_response_raises_bridge_error():
 
     with pytest.raises(BridgeError):
         make_client(handler).get_state()
+
+
+# --- no Origin header ---------------------------------------------------------------
+
+
+def test_no_request_ever_carries_an_origin_header():
+    captured = []
+
+    def handler(request):
+        captured.append("origin" in request.headers)
+        return json_response(200, {"status": "ok", "latest_seq": 0, "entries": []})
+
+    client = make_client(handler)
+    client.hello()
+    client.get_state()
+    client.compendium()
+    client.actions_since(5)
+    client.post_action({"action": "end_turn"})
+
+    assert captured
+    assert not any(captured)
 
 
 # --- close -------------------------------------------------------------------------

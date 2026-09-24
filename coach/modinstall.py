@@ -17,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 
 from coach.config import CONF_FILE_NAME, GAME_DIR
-from coach.saves import game_is_running
+from coach.saves import _refuse_if_running, _stamp, game_is_running
 
 DLL_NAME = "STS2_MCP.dll"
 MANIFEST_NAME = "STS2_MCP.json"
@@ -32,15 +32,6 @@ class InstallError(Exception):
 class InstallResult:
     previous_backup: Path | None
     token_created: bool
-
-
-def _refuse_if_running(is_running: Callable[[], bool]) -> None:
-    if is_running():
-        raise InstallError("Slay the Spire 2 is running; close the game first")
-
-
-def _stamp(now: datetime | None) -> str:
-    return (now or datetime.now()).strftime("%Y%m%d-%H%M%S")
 
 
 def _output_tail(result: subprocess.CompletedProcess, lines: int = 20) -> str:
@@ -87,7 +78,7 @@ def install_mod(
     A previous STS2_MCP.conf is copied back after the backup so its token, and
     any other keys we don't manage, survive a reinstall.
     """
-    _refuse_if_running(is_running)
+    _refuse_if_running(is_running, InstallError)
 
     existing = [
         name for name in (DLL_NAME, MANIFEST_NAME, CONF_FILE_NAME) if (mods_dir / name).is_file()
@@ -130,7 +121,7 @@ def enable_mod_in_settings(
     now: datetime | None = None,
 ) -> Path:
     """Flip mods_enabled and the mod's is_enabled flag in settings.save, after a backup."""
-    _refuse_if_running(is_running)
+    _refuse_if_running(is_running, InstallError)
 
     backup_root.mkdir(parents=True, exist_ok=True)
     backup_path = backup_root / f"{settings_path.name}.{_stamp(now)}"

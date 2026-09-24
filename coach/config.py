@@ -33,9 +33,23 @@ def read_token(mods_dir: Path) -> str | None:
         raw = (mods_dir / CONF_FILE_NAME).read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
-    token = json.loads(raw).get("token", "")
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    token = data.get("token", "")
     token = token.strip() if isinstance(token, str) else ""
     return token or None
+
+
+def _read_poll_interval_s(env: dict[str, str]) -> float:
+    raw = env.get("SPIRE_COACH_POLL_S", "0.2")
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"invalid setting SPIRE_COACH_POLL_S={raw}: must be a number"
+        ) from exc
 
 
 def load_config(env: dict[str, str] | None = None) -> Config:
@@ -45,6 +59,6 @@ def load_config(env: dict[str, str] | None = None) -> Config:
         base_url=env.get("SPIRE_COACH_BASE_URL", DEFAULT_BASE_URL).rstrip("/"),
         token=env.get("SPIRE_COACH_TOKEN") or read_token(mods_dir),
         data_dir=Path(env.get("SPIRE_COACH_DATA_DIR", str(DEFAULT_DATA_DIR))),
-        poll_interval_s=float(env.get("SPIRE_COACH_POLL_S", "0.2")),
+        poll_interval_s=_read_poll_interval_s(env),
         mods_dir=mods_dir,
     )

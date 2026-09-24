@@ -19,6 +19,10 @@ _TOKEN_REJECTED = (
     "token rejected: reinstall the mod (spire-coach mod install) or check STS2_MCP.conf"
 )
 _MOD_BUSY = "mod is busy (main thread overloaded); retry the request"
+_FORBIDDEN_FALLBACK = (
+    "request rejected (403 Forbidden): the mod refuses browser-origin requests; "
+    "make sure no Origin header is sent"
+)
 
 
 class BridgeError(Exception):
@@ -114,7 +118,7 @@ class ModClient:
         if response.status_code == 401:
             raise BridgeAuthError(_TOKEN_REJECTED)
         if response.status_code == 403:
-            raise BridgeAuthError(_server_error(response, "request rejected (403 Forbidden)"))
+            raise BridgeAuthError(_server_error(response, _FORBIDDEN_FALLBACK))
         if response.status_code == 503:
             raise BridgeUnavailable(_MOD_BUSY)
 

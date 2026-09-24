@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from coach.config import CONF_FILE_NAME, DEFAULT_BASE_URL, load_config, read_token
 
 
@@ -58,3 +60,27 @@ def test_poll_interval_and_data_dir_come_from_env(tmp_path):
     )
     assert cfg.poll_interval_s == 0.5
     assert cfg.data_dir == tmp_path / "d"
+
+
+# --- corrupt conf file -------------------------------------------------------
+
+
+def test_read_token_is_none_when_the_conf_file_is_not_valid_json(tmp_path):
+    (tmp_path / CONF_FILE_NAME).write_text("{not valid json", encoding="utf-8")
+    assert read_token(tmp_path) is None
+
+
+def test_load_config_does_not_raise_when_the_conf_file_is_not_valid_json(tmp_path):
+    (tmp_path / CONF_FILE_NAME).write_text("{not valid json", encoding="utf-8")
+    cfg = load_config({"SPIRE_COACH_MODS_DIR": str(tmp_path)})
+    assert cfg.token is None
+
+
+# --- invalid poll interval ----------------------------------------------------
+
+
+def test_non_numeric_poll_interval_raises_a_clear_value_error(tmp_path):
+    with pytest.raises(
+        ValueError, match=r"invalid setting SPIRE_COACH_POLL_S=abc: must be a number"
+    ):
+        load_config({"SPIRE_COACH_MODS_DIR": str(tmp_path), "SPIRE_COACH_POLL_S": "abc"})
