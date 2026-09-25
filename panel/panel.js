@@ -9,7 +9,8 @@
   const RETRY_MS = [500, 1000, 2000, 4000, 8000]; // then every 8 s
   const NOTICE_MS = 6000; // how long the panel's own error stays on the status line
   const MODE_WAIT_MS = 3000; // how long a mode switch may take to show up in a state
-  const THEN_COMPACT_MAX = 3;
+  const THEN_COMPACT_MAX = 3; // steps of the rest of the turn shown in the compact layout
+  const WARNINGS_COMPACT_MAX = 1;
   const LAYOUT_KEY = "spire-coach.layout";
 
   const PLACEHOLDERS = {
@@ -329,15 +330,7 @@
 
   function renderPath(steps) {
     view.then.hidden = steps.length === 0;
-    const compact = document.body.dataset.layout === "compact";
-    // Cut only when that saves a line: "and 1 more" would take the step's own line.
-    const shown =
-      compact && steps.length > THEN_COMPACT_MAX + 1 ? steps.slice(0, THEN_COMPACT_MAX) : steps;
-    const items = shown.map((step) => item(moveLabel(step)));
-    if (shown.length < steps.length) {
-      items.push(item(`and ${steps.length - shown.length} more`, "more"));
-    }
-    view.path.replaceChildren(...items);
+    view.path.replaceChildren(...shortList(steps.map(moveLabel), THEN_COMPACT_MAX, "moves"));
   }
 
   function renderOutcome(rec) {
@@ -352,14 +345,7 @@
   function renderWarnings(warnings) {
     const list = Array.isArray(warnings) ? warnings.filter((w) => typeof w === "string") : [];
     view.warnings.hidden = list.length === 0;
-    const compact = document.body.dataset.layout === "compact";
-    const shown = compact ? list.slice(0, 1) : list;
-    const items = shown.map((text) => item(text));
-    if (shown.length < list.length) {
-      const more = list.length - shown.length;
-      items.push(item(`and ${more} more warning${more === 1 ? "" : "s"}`, "more"));
-    }
-    view.warnings.replaceChildren(...items);
+    view.warnings.replaceChildren(...shortList(list, WARNINGS_COMPACT_MAX, "warnings"));
   }
 
   function renderAlternatives(alternatives) {
@@ -450,6 +436,16 @@
         return span;
       }),
     );
+  }
+
+  // List items for `texts`. The compact layout shows only the first `max`, then "and
+  // N more <things>", but only when that saves a line: "and 1 more" would take the
+  // hidden item's own line, so that item is shown instead.
+  function shortList(texts, max, things) {
+    const cut = document.body.dataset.layout === "compact" && texts.length > max + 1;
+    const items = (cut ? texts.slice(0, max) : texts).map((text) => item(text));
+    if (cut) items.push(item(`and ${texts.length - max} more ${things}`, "more"));
+    return items;
   }
 
   function item(text, className) {

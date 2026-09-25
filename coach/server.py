@@ -6,7 +6,8 @@
 - `GET /state` returns the current CoachState as JSON;
 - `WS /ws` sends the current state as soon as a panel connects, then every state
   published, so a panel that reconnects after a server restart or sleep is up to date
-  at once (Review Focus 5);
+  at once (Review Focus 5). Only the panel's own page may connect from a browser: a
+  page from any other origin is refused (1008) before the socket opens;
 - `POST /settings` takes `{mode?: "show"|"quiz", override_versions?: bool}` as JSON.
   A valid update goes to the coach whole; an invalid one is refused whole, with one
   sentence saying why.
@@ -31,7 +32,7 @@ from pathlib import Path
 
 import anyio
 import uvicorn
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
@@ -41,6 +42,8 @@ from coach.view import CoachState, one_line, sentence
 HOST = "127.0.0.1"  # offline: only this Mac can reach the panel
 DEFAULT_PORT = 15530
 PANEL_DIR = Path(__file__).resolve().parent.parent / "panel"
+
+_LOOPBACK_HOSTS = ("127.0.0.1", "localhost")  # the names the panel's page is opened by
 
 _SETTINGS = ("mode", "override_versions")
 _INBOX_MAX = 64  # states a slow panel may fall behind by before it skips the oldest
@@ -156,6 +159,9 @@ def create_app(
 
     @app.websocket("/ws")
     async def updates(websocket: WebSocket) -> None:
+        if not _from_the_panel(websocket):
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
         await websocket.accept()
         # Subscribed before the current state is read: a state published in between
         # is queued behind it, never lost.
@@ -187,6 +193,26 @@ def create_server(app: FastAPI, *, port: int = DEFAULT_PORT) -> uvicorn.Server:
 
 
 # --- helpers -------------------------------------------------------------------------
+
+
+def _from_the_panel(websocket: WebSocket) -> bool:
+    """Whether a socket may open: a page in a browser must be the panel itself.
+
+    A browser attaches the page's origin to a WebSocket handshake but applies no CORS
+    to it, so without this check any page open in the browser could read the coach's
+    state. The panel's page has origin http://127.0.0.1:<port> or http://localhost:<port>,
+    in a tab and in the pywebview window alike: the window loads that same URL into a
+    WKWebView. A client that sends no Origin is no page in a browser (a local script,
+    say) and may connect.
+    """
+    origin = websocket.headers.get("origin")
+    if origin is None:
+        return True
+    server = websocket.scope.get("server")
+    if not server:
+        return False  # no port to compare with
+    port = "" if server[1] == 80 else f":{server[1]}"  # an origin leaves out port 80
+    return origin in {f"http://{host}{port}" for host in _LOOPBACK_HOSTS}
 
 
 async def _until_closed(websocket: WebSocket) -> None:

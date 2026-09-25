@@ -13,7 +13,9 @@ import logging
 from coach.view import one_line
 
 TITLE = "Spire Coach"
-_BACKGROUND = "#0d0f14"  # the panel's own background, so the window never flashes white
+# The panel's own background (--night in panel/panel.css), shown until the page has
+# loaded: the window never flashes another colour.
+_BACKGROUND = "#141c29"
 
 log = logging.getLogger(__name__)
 

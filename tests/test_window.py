@@ -6,9 +6,11 @@ pywebview is always faked: no test opens a real window.
 from __future__ import annotations
 
 import logging
+import re
 import sys
 import types
 
+from coach.server import PANEL_DIR
 from coach.window import open_window
 
 URL = "http://127.0.0.1:15530/"
@@ -54,6 +56,20 @@ def test_the_window_takes_the_size_and_on_top_it_is_given(monkeypatch):
 
     [window] = webview.windows
     assert (window["width"], window["height"], window["on_top"]) == (420, 300, False)
+
+
+def test_the_window_opens_on_the_panels_own_background(monkeypatch):
+    # The colour lives in panel.css: the window shows it until the page has loaded,
+    # so it must be the same one, not a flash of another.
+    css = (PANEL_DIR / "panel.css").read_text(encoding="utf-8")
+    night = re.search(r"--night:\s*(#[0-9a-fA-F]{6})", css).group(1)
+    webview = FakeWebview()
+    monkeypatch.setitem(sys.modules, "webview", webview)
+
+    open_window(URL)
+
+    [window] = webview.windows
+    assert window["background_color"].lower() == night.lower()
 
 
 def test_without_pywebview_the_url_is_printed_for_the_browser(monkeypatch, capsys, caplog):

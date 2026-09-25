@@ -16,6 +16,7 @@ import time
 from collections.abc import Callable
 
 import pytest
+from fastapi import WebSocketDisconnect
 from fastapi.testclient import TestClient
 
 from coach.bridge.versions import VersionStatus
@@ -333,6 +334,47 @@ def test_a_panel_that_closes_is_dropped_at_once_not_at_the_next_publish(client, 
             time.sleep(0.01)
 
         assert coach.broadcaster.clients == 0
+
+
+@pytest.mark.parametrize(
+    "url, origin",
+    [
+        ("ws://127.0.0.1:15530/ws", "http://127.0.0.1:15530"),  # a tab, or the window
+        ("ws://127.0.0.1:15530/ws", "http://localhost:15530"),
+        ("ws://127.0.0.1/ws", "http://127.0.0.1"),  # an origin leaves out the default port
+    ],
+)
+def test_the_panels_own_page_may_open_the_socket(client, coach, url, origin):
+    with client.websocket_connect(url, headers={"origin": origin}) as panel:
+        assert receive(panel) == coach.state.to_dict()
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "http://evil.example",
+        "http://evil.example:15530",  # a DNS-rebinding page
+        "http://127.0.0.1:8000",  # another page on this Mac
+        "https://127.0.0.1:15530",
+        "http://127.0.0.1.evil.example:15530",
+        "null",  # a file:// page or a sandboxed frame
+    ],
+)
+def test_a_page_from_anywhere_else_is_refused_before_the_socket_opens(client, coach, origin):
+    # Browsers apply no CORS to a WebSocket: without this, any page open in the
+    # browser could read the coach's state.
+    with pytest.raises(WebSocketDisconnect) as refused:
+        with client.websocket_connect("ws://127.0.0.1:15530/ws", headers={"origin": origin}):
+            pass
+
+    assert refused.value.code == 1008  # policy violation
+    assert coach.broadcaster.clients == 0
+
+
+def test_a_client_that_sends_no_origin_may_connect(client, coach):
+    # No Origin header means no browser page: a local script, say.
+    with client.websocket_connect("ws://127.0.0.1:15530/ws") as panel:
+        assert receive(panel) == coach.state.to_dict()
 
 
 def test_the_app_makes_its_own_broadcaster_when_given_none(coach):
