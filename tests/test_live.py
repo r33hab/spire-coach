@@ -100,6 +100,49 @@ def hand_select(base, seq):
     return state
 
 
+def hand_select_over(base, seq, uids, *, selected=()):
+    """A hand selection (an exhaust) over `base`'s own hand cards `uids`, with the
+    cards in `selected` already toggled on screen."""
+    state = copy.deepcopy(base)
+    cards = [dict(card) for card in state["player"]["hand"] if card["uid"] in uids]
+    state["state_type"] = "hand_select"
+    state["in_combat"] = True
+    state["action_log_seq"] = seq
+    state["hand_select"] = {
+        "mode": "simple_select",
+        "prompt": "Select a card to Exhaust.",
+        "cards": [card for card in cards if card["uid"] not in selected],
+        "can_confirm": bool(selected),
+        "selection": {
+            "kind": "HAND",
+            "pile": None,
+            "prompt_key": "card_selection.TO_EXHAUST",
+            "source": {"type": "relic", "id": "NEW_RELIC", "uid": None},
+            "min": 1,
+            "max": 1,
+            "can_skip": False,
+            "selected": [{"uid": uid, "id": "X"} for uid in selected],
+        },
+    }
+    return state
+
+
+def after_exhausting(base, seq, uid):
+    """`base` once the hand card `uid` has been exhausted."""
+    state = copy.deepcopy(base)
+    state["action_log_seq"] = seq
+    player = state["player"]
+    card = next(c for c in player["hand"] if c["uid"] == uid)
+    player["hand"] = [c for c in player["hand"] if c["uid"] != uid]
+    for index, kept in enumerate(player["hand"]):
+        kept["index"] = index
+    player["exhaust_pile"].append(card)
+    player["exhaust_pile_ordered"].append(
+        {"id": card["id"], "is_upgraded": card["is_upgraded"], "uid": uid}
+    )
+    return state
+
+
 def with_new_hand_card(base, seq, *, uid, card_id, name):
     """`base` after a choose-a-card pick: the potion is gone and the new card is in hand."""
     state = copy.deepcopy(base)
@@ -1315,6 +1358,40 @@ def test_an_in_combat_choose_a_card_is_analyzed_with_the_fights_room_type_and_gr
     assert (pick_move.kind, pick_move.select_index) == ("select", 1)
     assert pick_pre == potion_post
     assert "UPPERCUT#1" in hand_uids(pick_post)
+
+
+def test_a_partial_pick_is_not_graded_and_the_confirmed_exhaust_is(make_session):
+    # Ruling (grade_selection): the mod builds player.hand from the fight's hand pile,
+    # which a toggled card only leaves on confirmation, so a partial pick is no new
+    # position. The confirmed pick moves the card to the exhaust pile: still in a
+    # pile, but it left the hand, and that is the pick.
+    def respond(live):
+        if live["pending_selection"] is not None:
+            strike = select(0, "Exhaust Strike", diff=2.5)
+            whirlwind = select(1, "Exhaust Whirlwind")
+            return analysis_of([strike, whirlwind, select(2, "Exhaust True Grit")], best=whirlwind)
+        return standard_analysis(live)
+
+    bridge = FakeBridge()
+    engine = FakeEngine(respond)
+    session, published = make_session(bridge, engine)
+    p0 = combat(seq=12)
+    settle(session, bridge, p0)
+    step_until(session, advising(published))
+    screen = hand_select_over(p0, 12, ("c1", "c2", "c4"))
+    settle(session, bridge, screen)  # opened by a relic: no move in the log
+    step_until(session, lambda: len(engine.analyze_calls) == 2 and advising(published)())
+
+    bridge.state = hand_select_over(p0, 12, ("c1", "c2", "c4"), selected=("c1",))
+    for _ in range(4):
+        session.step()
+    assert grade_history(published) == []
+    assert len(engine.analyze_calls) == 2  # the same position: nothing new to analyze
+
+    settle(session, bridge, after_exhausting(p0, 12, "c1"))
+    step_until(session, lambda: grade_history(published))
+    [graded] = grade_history(published)
+    assert (graded["played"]["label"], graded["label"]) == ("Exhaust Strike", "Inaccuracy")
 
 
 def test_a_hand_selection_shows_the_snapshot_builders_warnings_with_the_engines(make_session):
