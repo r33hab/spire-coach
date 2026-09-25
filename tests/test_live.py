@@ -846,6 +846,44 @@ def test_a_skipped_analysis_a_late_move_turns_out_to_need_is_run_after_all(make_
     ]
 
 
+def test_a_skip_decided_before_the_position_came_back_on_screen_is_undone(make_session):
+    # The worker decides a skip on its own thread. Here it skips P1 while a popup is
+    # on screen, and P1 comes back on screen before that skip is applied: P1 must be
+    # analyzed after all, not left thinking forever.
+    class HookedBridge(FakeBridge):
+        hook = None
+
+        def get_state(self):
+            if self.hook is not None:
+                hook, self.hook = self.hook, None
+                hook()
+            return super().get_state()
+
+    bridge = HookedBridge()
+    engine = FakeEngine(standard_analysis)
+    release_p0 = engine.hold(lambda live: "c1" in hand_uids(live))
+    session, published = make_session(bridge, engine)
+    settle(session, bridge, combat(seq=12))
+    p1 = combat(seq=13, hand=P1_HAND)
+    act(session, bridge, play(13, "c1", "JAW_WORM_0"), p1)
+    popup = load("state_non_combat.json")
+    popup.update(state_type="overlay", action_log_seq=13)
+    settle(session, bridge, popup)  # P1 is off screen
+    bridge.state = p1
+    session.step()  # P1's first poll again
+
+    def skip_lands_during_this_poll():
+        release_p0.set()
+        deadline = time.monotonic() + 5
+        while session._results.qsize() < 2:  # P0's analysis, then P1 skipped
+            assert time.monotonic() < deadline, "the worker never skipped P1"
+            time.sleep(0.001)
+
+    bridge.hook = skip_lands_during_this_poll
+    session.step()  # P1 settles on screen again, and then the skip is applied
+    step_until(session, advising(published, "c2"))
+
+
 # --- Review Focus 3: several actions between two polls --------------------------------
 
 

@@ -20,17 +20,18 @@ that is ambiguous (see `_first_sight_seq`). The move with seq N was made from th
 position seen at seq N - 1 (in the entry's act, floor and round); its "after" for the
 fidelity check is the very next settled position, if that one is still at seq N. A
 move whose position never settled on screen, or had no analysis, is Ungraded (Review
-Focus 1). Only human, in-combat moves are graded
-(Review Focus 3, ruling R4). A gap in the log (the game restarted, or entries were
-dropped) empties the timeline, so nothing is graded across it (ruling R5).
+Focus 1). Only human, in-combat moves are graded (Review Focus 3, ruling R4). A gap
+in the log (the game restarted, or entries were dropped) empties the timeline, so
+nothing is graded across it (ruling R5).
 
 In-combat selections are not logged as moves. A selection is graded when the next
 position settles at the same seq, by diffing the two with `grader.grade_selection`.
 
 Stale analyses. Every engine call runs on one worker thread, the newest position's
 analysis first (spec 7.1: when the player acts before a search finishes, "the coach
-starts on the new position"). An older position's analysis still runs, only to grade
-the move made from it, and never reaches the panel (Review Focus 1).
+starts on the new position"). An older position's analysis still runs if a move made
+from it needs grading, and never reaches the panel (Review Focus 1); one that nothing
+needs by its turn is skipped.
 
 Threading. Worker results are applied on the session's own thread, in `step()` and in
 `run()`'s waits between polls, so only that thread ever touches the session's state;
@@ -311,8 +312,8 @@ class CoachSession:
         (its first poll can read a seq one too high). Such a position gets no seq, so no
         move is ever matched to it and no fidelity check starts or ends at it (review
         Important 1): a few moves go ungraded rather than any being graded on the wrong
-        analysis. Nothing polled before it (the session's first position) is no evidence
-        of a move, so that one keeps its seq.
+        analysis. With nothing polled before it (the session's first position) there is
+        no sign of such a move, so that position keeps its seq.
         """
         first = _int_or_none(self._stabilizer.streak_first.get("action_log_seq"))
         before = self._stabilizer.before_streak
@@ -500,12 +501,16 @@ class CoachSession:
     def _on_analysis(self, position: _Position, outcome: object) -> None:
         current = position is self._current
         if outcome is SKIPPED:
+            if current or position.waiting_moves > 0:
+                # The worker decided on a view that went stale before this landed: the
+                # position is back on screen, or a move from it turned up. Needed after all.
+                self._submit_analysis(position, urgent=current)
+                return
             position.status = "skipped"
             self._runlog.append(
                 "analysis",
                 {"fingerprint": position.fingerprint, "current": current, "skipped": True},
             )
-            self._process_grades()
             return
         record = {"fingerprint": position.fingerprint, "current": current, "live": position.live}
         if isinstance(outcome, Analysis):
@@ -635,15 +640,14 @@ class CoachSession:
             after = self._seen_after(check.pre)
             if after is None:
                 waiting.append(check)  # the position after the move has not settled yet
-            elif after is _GONE or after.seq != check.post_seq or after.position.live is None:
-                # Another move came first, the fight ended, or the timeline moved on:
-                # there is no fair "after" to compare this move's outcome with.
+            elif reason := _no_fair_after(after, check.post_seq):
+                # There is no position to compare this move's outcome with.
                 self._runlog.append(
                     "check",
                     {
                         "pre_fingerprint": check.pre.position.fingerprint,
                         "move": dataclasses.asdict(check.move),
-                        "skipped": "no settled combat position right after the move",
+                        "skipped": reason,
                     },
                 )
             else:
@@ -784,6 +788,19 @@ class CoachSession:
 
 
 # --- helpers -------------------------------------------------------------------------
+
+
+def _no_fair_after(after: _Seen | object, post_seq: int | None) -> str | None:
+    """Why the settled position after a move cannot show that move's outcome, if so."""
+    if after is _GONE:
+        return "the move's position fell out of the timeline"
+    if after.seq is None:
+        return "the next position was first seen after the log had moved on"
+    if after.seq != post_seq:
+        return "another move came before the next position settled"
+    if after.position.live is None:
+        return "the next position is not a combat position the coach could read"
+    return None
 
 
 def _made_from(entry: dict, position: _Position) -> bool:
