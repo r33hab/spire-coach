@@ -371,6 +371,9 @@ class CoachSession:
             self._on_log_gap(since, latest, entries)
             return
         for entry in entries:
+            # Progress first: if handling an entry fails, the next poll moves on
+            # from it rather than handling it (and the ones before it) again.
+            self._last_seq = entry["seq"]
             self._on_entry(entry)
         self._last_seq = newest
 
@@ -728,8 +731,8 @@ class CoachSession:
             potion_value_hp=self._settings.potion_value_hp,
         )
         if state != self._published:
-            self._published = state
             self._publish(state)
+            self._published = state  # only once it went out: a failed publish is retried
 
 
 # --- helpers -------------------------------------------------------------------------

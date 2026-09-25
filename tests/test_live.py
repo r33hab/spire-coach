@@ -366,6 +366,15 @@ def p2_analysis(live):
     return analysis_of([grit, end_turn(diff=4.0)], best=grit)
 
 
+def choose_or_standard_analysis(live):
+    """The Attack Potion's choose-a-card screen: Bludgeon is best, Uppercut costs 6 HP."""
+    if live["pending_selection"] is not None:
+        bludgeon = select(0, "Bludgeon")
+        uppercut = select(1, "Uppercut", diff=6.0)
+        return analysis_of([bludgeon, uppercut, skip(diff=12.0)], best=bludgeon)
+    return standard_analysis(live)
+
+
 def standard_analysis(live):
     uids = hand_uids(live)
     if "c1" in uids:
@@ -855,6 +864,28 @@ def test_api_moves_are_logged_but_never_graded_or_checked(make_session, tmp_path
     assert [(r["seq"], r["source"]) for r in run_log(tmp_path, "action")] == [(13, "api")]
 
 
+def test_a_pick_on_a_screen_an_api_move_opened_stays_ungraded(make_session, tmp_path):
+    # Review minor 5: the api drinks an Attack Potion; the choose-a-card screen it
+    # opens is the api's to pick from too, so neither the potion nor the pick is graded.
+    bridge = FakeBridge()
+    engine = FakeEngine(choose_or_standard_analysis)
+    session, published = make_session(bridge, engine)
+    p0 = combat(seq=12)
+    p0["player"]["potions"][0]["id"] = "ATTACK_POTION"
+    settle(session, bridge, p0)
+    step_until(session, advising(published))
+
+    act(session, bridge, use_potion(13, 1, source="api"), choose_a_card(p0, seq=13))
+    step_until(session, lambda: len(engine.analyze_calls) == 2 and advising(published)())
+    picked = with_new_hand_card(p0, 13, uid="UPPERCUT#1", card_id="UPPERCUT", name="Uppercut")
+    settle(session, bridge, picked)
+    step_until(session, lambda: len(engine.analyze_calls) == 3 and advising(published)())
+
+    assert grade_history(published) == []
+    assert run_log(tmp_path, "grade") == []
+    assert engine.check_calls == []
+
+
 def test_an_out_of_combat_potion_is_logged_but_never_graded(make_session, tmp_path):
     # Ruling R4: selling a potion to the merchant is a use_potion with round null.
     bridge = FakeBridge()
@@ -903,6 +934,41 @@ def test_the_move_that_ends_a_fight_is_never_checked_against_the_next_fight(make
 
     assert [g["label"] for g in grade_history(published)] == ["Inaccuracy"]
     assert engine.check_calls == []
+
+
+def test_a_failed_publish_is_retried_and_no_log_entry_is_handled_twice(tmp_path):
+    # Review minor 1. Publishing the second of two grades fails: the entry it came
+    # from must not be read again on the next poll, and the panel must still get it.
+    published, failed = [], []
+
+    def flaky_publish(state):
+        grade = state.last_grade
+        if grade is not None and grade["played"]["label"] == "End turn" and not failed:
+            failed.append(state)
+            raise RuntimeError("the panel went away")
+        published.append(state)
+
+    bridge = FakeBridge()
+    session = CoachSession(
+        bridge,
+        FakeEngine(standard_analysis),
+        publish=flaky_publish,
+        data_dir=tmp_path,
+        settings=CoachSettings(),
+    )
+    try:
+        settle(session, bridge, combat(seq=12))
+        step_until(session, advising(published))
+        bridge.entries += [play(13, "c1", "JAW_WORM_0"), end_turn_entry(14)]
+        with pytest.raises(RuntimeError, match="the panel went away"):
+            session.step()
+        session.step()
+    finally:
+        session.close()
+
+    assert [r["seq"] for r in run_log(tmp_path, "grade")] == [13, 14]
+    assert bridge.actions_since_calls[-1] == 14
+    assert latest(published).last_grade["played"]["label"] == "End turn"
 
 
 # --- ruling R5: a game restart or dropped entries in the action log ------------------
@@ -1127,15 +1193,8 @@ def test_quiz_mode_hides_the_best_move_until_the_move_from_that_position_is_grad
 def test_an_in_combat_choose_a_card_is_analyzed_with_the_fights_room_type_and_graded(
     make_session,
 ):
-    def respond(live):
-        if live["pending_selection"] is not None:
-            bludgeon = select(0, "Bludgeon")
-            uppercut = select(1, "Uppercut", diff=6.0)
-            return analysis_of([bludgeon, uppercut, skip(diff=12.0)], best=bludgeon)
-        return standard_analysis(live)
-
     bridge = FakeBridge()
-    engine = FakeEngine(respond)
+    engine = FakeEngine(choose_or_standard_analysis)
     session, published = make_session(bridge, engine)
     p0 = combat(seq=12)
     p0["player"]["potions"][0]["id"] = "ATTACK_POTION"
