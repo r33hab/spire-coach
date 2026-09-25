@@ -376,3 +376,55 @@ def test_stabilizer_emits_only_once_across_a_long_unbroken_streak(monster_state)
     stabilizer = Stabilizer()
     results = [stabilizer.feed(copy.deepcopy(monster_state)) for _ in range(4)]
     assert results == [None, monster_state, None, None]
+
+
+# --- Stabilizer: the settled streak's first poll and the poll before it -----
+
+
+def with_seq(state, seq, **changes):
+    polled = copy.deepcopy(state)
+    polled["action_log_seq"] = seq
+    polled.update(changes)
+    return polled
+
+
+def test_stabilizer_exposes_the_first_poll_of_the_streak_it_emits(monster_state):
+    # The emitted state is the latest poll; the first poll of the same streak may
+    # carry an older action-log seq (a click lands between the two polls).
+    stabilizer = Stabilizer()
+    first = with_seq(monster_state, 12)
+    second = with_seq(monster_state, 13)
+
+    stabilizer.feed(first)
+    emitted = stabilizer.feed(second)
+
+    assert emitted is second
+    assert stabilizer.streak_first is first
+    assert stabilizer.before_streak is None  # nothing was polled before it
+
+
+def test_stabilizer_exposes_the_poll_just_before_the_streak_began(monster_state):
+    stabilizer = Stabilizer()
+    earlier = with_seq(monster_state, 11)
+    resolving = with_seq(monster_state, 12, is_resolving=True)
+    changed = copy.deepcopy(monster_state["player"])
+    changed["hp"] -= 5
+    first = with_seq(monster_state, 12, player=changed)
+    second = with_seq(monster_state, 12, player=changed)
+
+    for polled in (earlier, copy.deepcopy(earlier), resolving, first):
+        stabilizer.feed(polled)
+    assert stabilizer.feed(second) is second
+
+    assert stabilizer.streak_first is first
+    assert stabilizer.before_streak is resolving
+
+
+def test_stabilizer_keeps_the_streaks_first_poll_while_the_streak_lasts(monster_state):
+    stabilizer = Stabilizer()
+    first = with_seq(monster_state, 12)
+    stabilizer.feed(first)
+    stabilizer.feed(with_seq(monster_state, 12))
+    stabilizer.feed(with_seq(monster_state, 14))  # same position, the log moved on
+
+    assert stabilizer.streak_first is first
