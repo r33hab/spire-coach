@@ -1212,6 +1212,13 @@ def test_the_first_health_check_waits_for_a_slow_engine_start(tmp_path, monkeypa
         "EngineClient",
         lambda cmd, *, workers: EngineClient(cmd, workers=workers, request_timeout_s=0.3),
     )
+    waited = []
+
+    def health_check(engine, *, timeout_s=None):
+        waited.append(timeout_s)
+        return engine_health_problems(engine, timeout_s=timeout_s)
+
+    monkeypatch.setattr(cli, "engine_health_problems", health_check)
 
     def wait_for_ctrl_c():
         run.steps.append("waited for Ctrl-C")
@@ -1223,6 +1230,7 @@ def test_the_first_health_check_waits_for_a_slow_engine_start(tmp_path, monkeypa
     assert run(window=False, wait_for_ctrl_c=wait_for_ctrl_c) == 0
 
     assert run.steps == ["waited for Ctrl-C"]
+    assert waited == [30.0]  # the configured startup timeout
     assert [r["method"] for r in run.engine_requests()].count("health") == 1  # answered
     run.assert_all_stopped()
 
