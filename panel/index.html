@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' ws://127.0.0.1:* ws://localhost:*; img-src 'self' data:; base-uri 'none'; form-action 'none'">
+  <meta name="color-scheme" content="dark">
+  <title>Spire Coach</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/panel/panel.css">
+  <script src="/panel/panel.js" defer></script>
+</head>
+<body data-layout="expanded" data-tone="connecting">
+  <main class="panel">
+    <header class="bar">
+      <p class="run" id="run"></p>
+      <div class="controls">
+        <div class="switch" role="group" aria-label="Coach mode">
+          <button type="button" data-mode="show" aria-pressed="true"
+                  title="Show the best move right away">Show</button>
+          <button type="button" data-mode="quiz" aria-pressed="false"
+                  title="Hide the best move until you have made yours">Quiz</button>
+        </div>
+        <button type="button" class="layout" id="layout">Compact</button>
+      </div>
+    </header>
+
+    <section class="status">
+      <span class="dot" aria-hidden="true"></span>
+      <p class="status-text" id="status-text" aria-live="polite">Connecting to the coach…</p>
+      <button type="button" class="override" id="override" hidden></button>
+    </section>
+
+    <section class="last" id="last" hidden>
+      <div class="last-head">
+        <span class="label">Last move</span>
+        <span class="chip" id="chip"></span>
+        <span class="caution" id="grade-unreliable" hidden>(unreliable)</span>
+        <span class="move last-played compact-only" id="last-played"></span>
+      </div>
+      <p class="last-detail expanded-only" id="last-detail"></p>
+    </section>
+
+    <section class="advice">
+      <div class="advice-head">
+        <span class="label">Best move</span>
+        <span class="tag caution" id="unreliable" hidden>unreliable</span>
+      </div>
+      <p class="best" id="best">
+        <span class="best-name" id="best-name">Connecting…</span>
+        <span class="best-target" id="best-target"></span>
+      </p>
+      <div class="then" id="then" hidden>
+        <span class="label">Then</span>
+        <ol class="path" id="path"></ol>
+      </div>
+      <dl class="outcome" id="outcome" hidden>
+        <div class="stat">
+          <dt>expected HP loss</dt>
+          <dd id="hp-loss"></dd>
+        </div>
+        <div class="stat">
+          <dt>death risk</dt>
+          <dd id="death-risk"></dd>
+        </div>
+      </dl>
+      <ul class="warnings" id="warnings" hidden></ul>
+    </section>
+
+    <section class="others expanded-only" id="others" hidden>
+      <div class="others-head">
+        <span class="label">Other moves</span>
+        <span class="label">extra HP lost</span>
+      </div>
+      <ol class="alternatives" id="alternatives"></ol>
+    </section>
+  </main>
+</body>
+</html>
