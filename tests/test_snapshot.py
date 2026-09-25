@@ -44,6 +44,21 @@ def hand_select_state() -> dict:
     return load("combat_hand_select.json")
 
 
+@pytest.fixture
+def hand_select_with_selection_state() -> dict:
+    return load("combat_hand_select_with_selection.json")
+
+
+@pytest.fixture
+def card_select_grid_state() -> dict:
+    return load("combat_card_select_grid.json")
+
+
+@pytest.fixture
+def card_select_choose_state() -> dict:
+    return load("combat_card_select_choose.json")
+
+
 # ---------------------------------------------------------------------------
 # Full combat fixture -> exact expected snapshot
 # ---------------------------------------------------------------------------
@@ -144,7 +159,7 @@ def test_full_combat_fixture_produces_exact_expected_snapshot(combat_state):
                 "id": "ASCENDERS_BANE",
                 "upgraded": False,
                 "uid": "c13",
-                "cost": -2,
+                "cost": None,
                 "enchantment": None,
                 "enchant_amount": None,
                 "fields": {},
@@ -303,9 +318,13 @@ def test_snapshot_never_reads_draw_pile_ordered_key(combat_state):
 
 
 # ---------------------------------------------------------------------------
-# hand_select: the mod cannot supply pending_selection yet, so it always
-# raises rather than inventing kind/source_card/min/max (I3 / controller
-# ruling; full support lands in task 11b after mod task 6c).
+# hand_select: room_type must still be supplied externally (its own
+# state_type is not a room type). `combat_hand_select.json` predates mod
+# Task 6c's `selection` object, so it is this suite's "older mod" fixture:
+# nothing is invented, and the gap is reported as a warning instead of an
+# error (task-11b requirement 4; supersedes Task 11's I3 hard-raise ruling,
+# now that the mod can report a selection at all for the states that have
+# one).
 # ---------------------------------------------------------------------------
 
 
@@ -315,11 +334,234 @@ def test_hand_select_without_room_type_raises_room_type_error(hand_select_state)
     assert exc_info.value.path == "room_type"
 
 
-def test_hand_select_with_room_type_still_raises_pending_selection_gap(hand_select_state):
+def test_hand_select_without_selection_object_returns_null_pending_selection_with_warning(
+    hand_select_state,
+):
+    warnings: list[str] = []
+    snapshot = build_live_snapshot(
+        hand_select_state, game_version=GAME_VERSION, room_type="monster", warnings=warnings
+    )
+    assert snapshot["pending_selection"] is None
+    assert len(warnings) == 1
+    assert "selection" in warnings[0]
+
+
+# ---------------------------------------------------------------------------
+# pending_selection: schema section 1.1, built from the mod's `selection`
+# object (task-11b requirements 3/4) plus the controller-ruling `played_card`
+# (built from player.play_pile, matched by selection.source.uid).
+# ---------------------------------------------------------------------------
+
+
+def test_pending_selection_for_hand_with_a_toggled_card_and_its_played_card(
+    hand_select_with_selection_state,
+):
+    snapshot = build_live_snapshot(
+        hand_select_with_selection_state, game_version=GAME_VERSION, room_type="monster"
+    )
+    assert snapshot["pending_selection"] == {
+        "kind": "HAND",
+        "pile": None,
+        "prompt_key": "card_selection.TO_EXHAUST",
+        "source_card": "BURNING_PACT",
+        "source_potion": None,
+        "source_relic": None,
+        "played_card": {
+            "id": "BURNING_PACT",
+            "upgraded": False,
+            "uid": "BURNING_PACT#0",
+            "cost": 1,
+            "enchantment": None,
+            "enchant_amount": None,
+            "fields": {},
+        },
+        "candidates": [
+            {
+                "id": "DEFEND_IRONCLAD",
+                "upgraded": False,
+                "uid": "DEFEND_IRONCLAD#3",
+                "cost": 1,
+                "enchantment": None,
+                "enchant_amount": None,
+                "fields": {},
+            },
+            {
+                "id": "STRIKE_IRONCLAD",
+                "upgraded": True,
+                "uid": "STRIKE_IRONCLAD#2",
+                "cost": 1,
+                "enchantment": None,
+                "enchant_amount": None,
+                "fields": {},
+            },
+        ],
+        "min": 1,
+        "max": 1,
+        "can_skip": False,
+        "selected_uids": ["DEFEND_IRONCLAD#3"],
+    }
+
+
+def test_pending_selection_for_grid_over_the_discard_pile_with_no_play_pile(card_select_grid_state):
+    """This fixture reports no player.play_pile at all: a card-sourced
+    selection with nothing to match against still resolves played_card to
+    null, with a warning (controller ruling, third test case)."""
+    warnings: list[str] = []
+    snapshot = build_live_snapshot(
+        card_select_grid_state, game_version=GAME_VERSION, room_type="monster", warnings=warnings
+    )
+    assert snapshot["pending_selection"] == {
+        "kind": "GRID",
+        "pile": "DISCARD",
+        "prompt_key": "cards.HEADBUTT.selectionScreenPrompt",
+        "source_card": "HEADBUTT",
+        "source_potion": None,
+        "source_relic": None,
+        "played_card": None,
+        "candidates": [
+            {
+                "id": "IRON_WAVE",
+                "upgraded": False,
+                "uid": "IRON_WAVE#0",
+                "cost": 1,
+                "enchantment": None,
+                "enchant_amount": None,
+                "fields": {},
+            },
+            {
+                "id": "SHRUG_IT_OFF",
+                "upgraded": False,
+                "uid": "SHRUG_IT_OFF#0",
+                "cost": 1,
+                "enchantment": None,
+                "enchant_amount": None,
+                "fields": {},
+            },
+        ],
+        "min": 1,
+        "max": 1,
+        "can_skip": False,
+        "selected_uids": [],
+    }
+    assert len(warnings) == 1
+    assert "play_pile" in warnings[0]
+
+
+def test_pending_selection_for_choose_with_generated_cards_can_skip_and_a_potion_source(
+    card_select_choose_state,
+):
+    snapshot = build_live_snapshot(
+        card_select_choose_state, game_version=GAME_VERSION, room_type="monster"
+    )
+    assert snapshot["pending_selection"] == {
+        "kind": "CHOOSE",
+        "pile": None,
+        "prompt_key": "gameplay_ui.CHOOSE_CARD_HEADER",
+        "source_card": None,
+        "source_potion": "ATTACK_POTION",
+        "source_relic": None,
+        "played_card": None,
+        "candidates": [
+            {
+                "id": "BLUDGEON",
+                "upgraded": False,
+                "uid": "BLUDGEON#0",
+                "cost": 3,
+                "enchantment": None,
+                "enchant_amount": None,
+                "fields": {},
+            },
+            {
+                "id": "UPPERCUT",
+                "upgraded": False,
+                "uid": "UPPERCUT#0",
+                "cost": 2,
+                "enchantment": None,
+                "enchant_amount": None,
+                "fields": {},
+            },
+        ],
+        "min": 0,
+        "max": 1,
+        "can_skip": True,
+        "selected_uids": [],
+    }
+
+
+def test_pending_selection_power_source_warns_and_nulls_all_three_source_fields(
+    hand_select_with_selection_state,
+):
+    mutated = copy.deepcopy(hand_select_with_selection_state)
+    mutated["hand_select"]["selection"]["source"] = {
+        "type": "power",
+        "id": "ENTROPY_POWER",
+        "uid": None,
+    }
+    warnings: list[str] = []
+    snapshot = build_live_snapshot(
+        mutated, game_version=GAME_VERSION, room_type="monster", warnings=warnings
+    )
+    pending = snapshot["pending_selection"]
+    assert pending["source_card"] is None
+    assert pending["source_potion"] is None
+    assert pending["source_relic"] is None
+    assert pending["played_card"] is None
+    assert len(warnings) == 1
+    assert "power" in warnings[0]
+
+
+def test_pending_selection_unknown_source_warns_and_nulls_all_three_source_fields(
+    hand_select_with_selection_state,
+):
+    mutated = copy.deepcopy(hand_select_with_selection_state)
+    mutated["hand_select"]["selection"]["source"] = {"type": "unknown", "id": None, "uid": None}
+    warnings: list[str] = []
+    snapshot = build_live_snapshot(
+        mutated, game_version=GAME_VERSION, room_type="monster", warnings=warnings
+    )
+    pending = snapshot["pending_selection"]
+    assert pending["source_card"] is None
+    assert pending["source_potion"] is None
+    assert pending["source_relic"] is None
+    assert len(warnings) == 1
+    assert "unknown" in warnings[0]
+
+
+def test_pending_selection_card_source_with_no_matching_play_pile_card_warns(
+    hand_select_with_selection_state,
+):
+    mutated = copy.deepcopy(hand_select_with_selection_state)
+    mutated["player"]["play_pile"] = [
+        {
+            "uid": "SOME_OTHER_CARD#0",
+            "name": "Some Other Card",
+            "cost": "1",
+            "star_cost": None,
+            "description": "...",
+            "id": "SOME_OTHER_CARD",
+            "is_upgraded": False,
+            "upgrade_level": 0,
+            "enchantment": None,
+            "affliction": None,
+            "fields": {},
+            "unplayable": False,
+        }
+    ]
+    warnings: list[str] = []
+    snapshot = build_live_snapshot(
+        mutated, game_version=GAME_VERSION, room_type="monster", warnings=warnings
+    )
+    assert snapshot["pending_selection"]["played_card"] is None
+    assert len(warnings) == 1
+    assert "play_pile" in warnings[0]
+
+
+def test_non_list_play_pile_raises_cleanly(hand_select_with_selection_state):
+    mutated = copy.deepcopy(hand_select_with_selection_state)
+    mutated["player"]["play_pile"] = "not-even-a-list"
     with pytest.raises(SnapshotError) as exc_info:
-        build_live_snapshot(hand_select_state, game_version=GAME_VERSION, room_type="monster")
-    assert exc_info.value.path == "hand_select"
-    assert "does not report" in str(exc_info.value)
+        build_live_snapshot(mutated, game_version=GAME_VERSION, room_type="monster")
+    assert exc_info.value.path == "player.play_pile"
 
 
 # ---------------------------------------------------------------------------
@@ -372,8 +614,12 @@ def test_reviving_enemy_kept_dead_enemy_dropped(combat_state):
 
 
 # ---------------------------------------------------------------------------
-# Card cost: X-cost, and unplayable based on the card's own signal (reviewer
-# note), which exists in the hand but not in a pile.
+# Card cost: X-cost, and unplayable based on the card's own `unplayable` flag
+# (task-11b requirement 5), now present on every card object including pile
+# cards. `combat_full.json` predates the flag everywhere (an older-mod
+# fixture for this purpose), so it exercises the negative-cost fallback;
+# dedicated tests below exercise the modern flag explicitly, in both hand and
+# pile, and prove the flag -- not the sign -- has the final say.
 # ---------------------------------------------------------------------------
 
 
@@ -383,20 +629,41 @@ def test_x_cost_card_has_null_cost(combat_state):
     assert whirlwind["cost"] is None
 
 
-def test_unplayable_hand_card_has_null_cost_via_unplayable_reason(combat_state):
+def test_negative_cost_without_unplayable_flag_has_null_cost_in_hand(combat_state):
+    """Older mod (no `unplayable` key anywhere): the fallback nulls a
+    negative displayed cost in the hand, same as the removed unplayable_reason
+    check used to."""
     snapshot = build_live_snapshot(combat_state, game_version=GAME_VERSION)
     bane = next(c for c in snapshot["hand"] if c["id"] == "ASCENDERS_BANE")
     assert bane["cost"] is None
 
 
-def test_unplayable_signal_absent_in_pile_cost_passes_through(combat_state):
-    """Pile Card Objects carry no can_play/unplayable_reason/keywords at all
-    (confirmed against McpMod.StateBuilder.cs's BuildPileCardList), so a
-    curse sitting in a pile shows its raw (here negative) cost rather than
-    being nulled -- there is no signal to null it on. See task-11-report.md
-    fix-round concerns."""
+def test_negative_cost_without_unplayable_flag_has_null_cost_in_pile_too(combat_state):
+    """Older mod, pile card: the same fallback now also nulls a curse sitting
+    in a pile, since the fallback no longer depends on a hand-only signal
+    (supersedes Task 11's "no signal to null it on" finding)."""
     snapshot = build_live_snapshot(combat_state, game_version=GAME_VERSION)
     bane = next(c for c in snapshot["draw_pile"] if c["id"] == "ASCENDERS_BANE")
+    assert bane["cost"] is None
+
+
+def test_unplayable_true_flag_nulls_cost_even_if_positive(combat_state):
+    """The modern flag is authoritative, independent of the sign: a
+    positive-cost card explicitly flagged unplayable is still nulled."""
+    mutated = copy.deepcopy(combat_state)
+    mutated["player"]["hand"][0]["unplayable"] = True  # STRIKE_IRONCLAD, cost "1"
+    snapshot = build_live_snapshot(mutated, game_version=GAME_VERSION)
+    strike = next(c for c in snapshot["hand"] if c["id"] == "STRIKE_IRONCLAD")
+    assert strike["cost"] is None
+
+
+def test_unplayable_false_flag_keeps_negative_cost(combat_state):
+    """The modern flag overrides the negative-cost fallback too: `false`
+    means playable even if the displayed cost is (temporarily) negative."""
+    mutated = copy.deepcopy(combat_state)
+    mutated["player"]["hand"][2]["unplayable"] = False  # ASCENDERS_BANE, cost "-2"
+    snapshot = build_live_snapshot(mutated, game_version=GAME_VERSION)
+    bane = next(c for c in snapshot["hand"] if c["id"] == "ASCENDERS_BANE")
     assert bane["cost"] == -2
 
 
@@ -413,20 +680,62 @@ def test_cost_until_played_is_dropped(combat_state):
 
 
 # ---------------------------------------------------------------------------
-# Category prefix stripping
+# Character: player.character_id is locale-independent (task-11b requirement
+# 1); an older mod without it falls back to mapping the English title, with
+# a warning, and anything unmappable raises.
 # ---------------------------------------------------------------------------
 
 
-def test_character_category_prefix_is_stripped(combat_state):
-    mutated = copy.deepcopy(combat_state)
-    mutated["player"]["character"] = "CHARACTER.IRONCLAD"
-    snapshot = build_live_snapshot(mutated, game_version=GAME_VERSION)
-    assert snapshot["character"] == "IRONCLAD"
-
-
-def test_character_without_prefix_is_unchanged(combat_state):
+def test_character_id_is_used_directly(combat_state):
     snapshot = build_live_snapshot(combat_state, game_version=GAME_VERSION)
     assert snapshot["character"] == "IRONCLAD"
+
+
+def test_missing_character_id_falls_back_to_english_title_with_warning(combat_state):
+    mutated = copy.deepcopy(combat_state)
+    del mutated["player"]["character_id"]
+    mutated["player"]["character"] = "The Ironclad"
+    warnings: list[str] = []
+    snapshot = build_live_snapshot(mutated, game_version=GAME_VERSION, warnings=warnings)
+    assert snapshot["character"] == "IRONCLAD"
+    assert len(warnings) == 1
+    assert "character_id" in warnings[0]
+    assert "The Ironclad" in warnings[0]
+
+
+@pytest.mark.parametrize(
+    "title,character_id",
+    [
+        ("The Ironclad", "IRONCLAD"),
+        ("The Silent", "SILENT"),
+        ("The Defect", "DEFECT"),
+        ("The Necrobinder", "NECROBINDER"),
+        ("The Regent", "REGENT"),
+    ],
+)
+def test_every_english_title_maps_without_character_id(combat_state, title, character_id):
+    mutated = copy.deepcopy(combat_state)
+    del mutated["player"]["character_id"]
+    mutated["player"]["character"] = title
+    snapshot = build_live_snapshot(mutated, game_version=GAME_VERSION)
+    assert snapshot["character"] == character_id
+
+
+def test_unrecognized_character_value_raises(combat_state):
+    mutated = copy.deepcopy(combat_state)
+    mutated["player"]["character_id"] = "NOT_A_REAL_CHARACTER"
+    with pytest.raises(SnapshotError, match="NOT_A_REAL_CHARACTER") as exc_info:
+        build_live_snapshot(mutated, game_version=GAME_VERSION)
+    assert exc_info.value.path == "player.character_id"
+
+
+def test_unrecognized_character_title_without_character_id_raises(combat_state):
+    mutated = copy.deepcopy(combat_state)
+    del mutated["player"]["character_id"]
+    mutated["player"]["character"] = "A Mystery Adventurer"
+    with pytest.raises(SnapshotError, match="A Mystery Adventurer") as exc_info:
+        build_live_snapshot(mutated, game_version=GAME_VERSION)
+    assert exc_info.value.path == "player.character"
 
 
 # ---------------------------------------------------------------------------
@@ -570,6 +879,50 @@ def test_ordered_pile_matches_duplicate_null_uids_without_collapsing(combat_stat
         "STRIKE_IRONCLAD",
     ]
     assert len(snapshot["discard_pile"]) == 2
+
+
+def test_explicitly_empty_ordered_pile_raises_when_unordered_pile_is_non_empty(combat_state):
+    """Carried from Task 11's re-review: an explicit [] must not be treated
+    the same as an absent (None) *_ordered -- it still has to be a
+    permutation of the unordered pile, so it raises on the length mismatch
+    exactly like a too-short list would."""
+    mutated = copy.deepcopy(combat_state)
+    mutated["player"]["discard_pile_ordered"] = []
+    with pytest.raises(SnapshotError) as exc_info:
+        build_live_snapshot(mutated, game_version=GAME_VERSION)
+    assert exc_info.value.path == "player.discard_pile_ordered"
+
+
+def test_explicitly_empty_ordered_pile_is_fine_when_unordered_pile_is_also_empty(combat_state):
+    mutated = copy.deepcopy(combat_state)
+    mutated["player"]["exhaust_pile"] = []
+    mutated["player"]["exhaust_pile_ordered"] = []
+    snapshot = build_live_snapshot(mutated, game_version=GAME_VERSION)
+    assert snapshot["exhaust_pile"] == []
+
+
+def test_absent_ordered_pile_still_falls_back_to_unordered_order(combat_state):
+    """None (the key genuinely absent) is unaffected by the [] fix above."""
+    mutated = copy.deepcopy(combat_state)
+    del mutated["player"]["discard_pile_ordered"]
+    snapshot = build_live_snapshot(mutated, game_version=GAME_VERSION)
+    assert [c["id"] for c in snapshot["discard_pile"]] == ["IRON_WAVE", "STRIKE_IRONCLAD"]
+
+
+# ---------------------------------------------------------------------------
+# Regression: the WHOLE snapshot is independent of player.draw_pile's own
+# input order too, not just draw_pile_ordered (carried from Task 11's
+# re-review).
+# ---------------------------------------------------------------------------
+
+
+def test_reversed_draw_pile_input_produces_an_identical_snapshot(combat_state):
+    original = build_live_snapshot(combat_state, game_version=GAME_VERSION)
+
+    reversed_state = copy.deepcopy(combat_state)
+    reversed_state["player"]["draw_pile"] = list(reversed(reversed_state["player"]["draw_pile"]))
+
+    assert build_live_snapshot(reversed_state, game_version=GAME_VERSION) == original
 
 
 # ---------------------------------------------------------------------------
@@ -969,6 +1322,23 @@ _HISTORY_ACCEPTED_KEYS = {
     "attacks_played_this_turn",
     "skills_played_this_turn",
 }
+# Schema section 1.1, as amended 2026-09-24 plus the played_card controller
+# ruling. Written out fresh rather than imported from coach.snapshot, same
+# independence convention as the rest of this file.
+_PENDING_SELECTION_KEYS = {
+    "kind",
+    "pile",
+    "prompt_key",
+    "source_card",
+    "source_potion",
+    "source_relic",
+    "played_card",
+    "candidates",
+    "min",
+    "max",
+    "can_skip",
+    "selected_uids",
+}
 
 
 def _assert_card_shape(card: dict) -> None:
@@ -1188,3 +1558,29 @@ def test_snapshot_keys_are_subset_of_converter_live_fixtures(combat_state):
 
     unexpected = snapshot_keys - converter_keys
     assert not unexpected, f"keys not seen in any converter live fixture: {sorted(unexpected)}"
+
+
+def test_pending_selection_keys_are_subset_of_schema_section_1_1(
+    hand_select_with_selection_state, card_select_grid_state, card_select_choose_state
+):
+    """The converter's top-level sample fixtures (checked above) predate
+    schema section 1.1's amendment: their own pending_selection is always
+    null, so they cannot stand in for it here. Checked against the schema's
+    own key list instead (task-11b requirement 6)."""
+    selection_snapshots = [
+        build_live_snapshot(
+            hand_select_with_selection_state, game_version=GAME_VERSION, room_type="monster"
+        ),
+        build_live_snapshot(card_select_grid_state, game_version=GAME_VERSION, room_type="monster"),
+        build_live_snapshot(
+            card_select_choose_state, game_version=GAME_VERSION, room_type="monster"
+        ),
+    ]
+    for snapshot in selection_snapshots:
+        pending = snapshot["pending_selection"]
+        assert pending is not None
+        assert set(pending.keys()) <= _PENDING_SELECTION_KEYS
+        for candidate in pending["candidates"]:
+            assert set(candidate.keys()) <= _CARD_KEYS
+        if pending["played_card"] is not None:
+            assert set(pending["played_card"].keys()) <= _CARD_KEYS

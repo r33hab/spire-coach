@@ -27,9 +27,31 @@ from collections import Counter, defaultdict
 SCHEMA = "sts2-live-snapshot/1"
 
 _COMBAT_ROOM_TYPES = frozenset({"monster", "elite", "boss"})
-_RECOGNIZED_STATE_TYPES = _COMBAT_ROOM_TYPES | {"hand_select"}
+# hand_select and an in-combat card_select (grid or choose-a-card) both carry
+# a `selection` object and neither's own state_type is a room type (task-11b).
+_SELECTION_STATE_TYPES = frozenset({"hand_select", "card_select"})
+_RECOGNIZED_STATE_TYPES = _COMBAT_ROOM_TYPES | _SELECTION_STATE_TYPES
 
-_UNPLAYABLE_REASON = "Unplayable"
+# player.character_id is locale-independent (mod Task 6c). An older mod
+# without it only reports the English-language title, so this maps that
+# title back to the id it would have sent (task-11b requirement 1).
+_CHARACTER_TITLE_IDS: dict[str, str] = {
+    "The Ironclad": "IRONCLAD",
+    "The Silent": "SILENT",
+    "The Defect": "DEFECT",
+    "The Necrobinder": "NECROBINDER",
+    "The Regent": "REGENT",
+}
+_CHARACTER_IDS = frozenset(_CHARACTER_TITLE_IDS.values())
+
+# selection.source.type values the schema has a field for; a "power" or
+# "unknown" source has none, so all three source_* fields stay null instead
+# (task-11b requirement 3).
+_SELECTION_SOURCE_FIELDS: dict[str, str] = {
+    "card": "source_card",
+    "potion": "source_potion",
+    "relic": "source_relic",
+}
 
 # The game's MonsterMoves.Intents.IntentType (decompiled IntentType.cs), all 15 values,
 # spelled the live snapshot's way (task-11-fix-1.md C1). IntentType.ToString() is
@@ -188,11 +210,6 @@ def _require_readable_int(
 # ---------------------------------------------------------------------------
 
 
-def _strip_category_prefix(value: str) -> str:
-    """`CHARACTER.IRONCLAD` -> `IRONCLAD`. A value with no prefix passes through."""
-    return value.rsplit(".", 1)[-1]
-
-
 def _strip_entity_suffix(entity_id: str) -> str:
     """`JAW_WORM_0` -> `JAW_WORM`."""
     return entity_id.rsplit("_", 1)[0]
@@ -213,16 +230,21 @@ def _primitive_fields(fields: dict | None) -> dict:
 def _build_cost(card: dict, *, path: str) -> int | None:
     """The mod's cost is a string: "X" becomes null.
 
-    Unplayable becomes null based on the card's own unplayable signal, not
-    the sign of the number (task-11-fix-1.md reviewer note): a relative
-    cost override CAN legitimately push a playable card below 0 (Kingly
-    Kick, per Task 5's report), so a negative cost alone is not evidence of
-    unplayability. In the hand, `unplayable_reason == "Unplayable"` is that
-    signal. Pile Card Objects and hand_select candidates carry no such
-    signal at all (confirmed against McpMod.StateBuilder.cs's
-    BuildPileCardList, which never sets can_play/unplayable_reason/keywords)
-    -- for those this only ever nulls "X", and passes the raw parsed number
-    through otherwise, negative or not.
+    Unplayable becomes null based on the card's own `unplayable` signal, now
+    present on every card object -- hand, pile, deck and selection-screen
+    alike (mod Task 6c) -- not the sign of the number: a relative cost
+    override can legitimately push a playable card below 0 (Kingly Kick, per
+    Task 5's report), so a negative cost alone is not evidence of
+    unplayability when the flag is there to ask instead (task-11b
+    requirement 5).
+
+    An older mod that predates the flag sends no `unplayable` key at all
+    (never `null`; `null` there means "the flag itself is unreadable", not
+    "absent", and is treated the same as `false` here since only `true` is
+    ever unambiguous). Without it, this falls back to the previous
+    approximation: the game's own "unplayable" cost convention is negative
+    (a curse or status), so a negative cost becomes null too, and a
+    non-negative one passes through unchanged.
     """
     raw_cost = _require_str(card, "cost", f"{path}.cost")
     if raw_cost == "X":
@@ -231,9 +253,11 @@ def _build_cost(card: dict, *, path: str) -> int | None:
         value = int(raw_cost)
     except ValueError as exc:
         raise SnapshotError(f"{path}.cost", f"unparseable cost {raw_cost!r}") from exc
-    if card.get("unplayable_reason") == _UNPLAYABLE_REASON:
-        return None
-    return value
+
+    unplayable = card.get("unplayable")
+    if unplayable is not None:
+        return None if unplayable else value
+    return None if value < 0 else value
 
 
 def _build_card_fields(fields: dict) -> dict:
@@ -312,7 +336,12 @@ def _build_ordered_pile(
     *_ordered entries are the minimal {id, is_upgraded, uid} shape; each is
     matched by uid to its full Pile Card Object in the unordered list to
     recover cost/enchantment/fields. Falls back to the unordered list's own
-    order if *_ordered is absent from the payload.
+    order if *_ordered is absent (None) from the payload.
+
+    An explicitly empty *_ordered ([]) is NOT treated as absent (task-11b,
+    carried over from Task 11's re-review): it still has to be a permutation
+    of the unordered pile, so it raises via the length check below when the
+    unordered pile is non-empty, exactly like any other length mismatch.
 
     *_ordered must be a permutation of the unordered pile: same length and
     the same multiset of uids (task-11-fix-1.md I1), checked with a Counter
@@ -331,7 +360,7 @@ def _build_ordered_pile(
         raise SnapshotError(
             f"player.{ordered_key}", f"expected an array, got {type(ordered).__name__}"
         )
-    if not ordered:
+    if ordered is None:
         return [
             _build_card(c, path=f"{path}[{i}]", warnings=warnings)
             for i, c in enumerate(unordered)
@@ -469,6 +498,34 @@ def _build_player(player: dict, *, warnings: list[str]) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Character (task-11b requirement 1)
+# ---------------------------------------------------------------------------
+
+
+def _character_from_title(player: dict, *, warnings: list[str]) -> str:
+    """Fallback for an older mod that has no `character_id`: map its
+    English-language `character` title back to the id."""
+    title = _require_str(player, "character", "player.character")
+    mapped = _CHARACTER_TITLE_IDS.get(title)
+    if mapped is None:
+        raise SnapshotError("player.character", f"unrecognized character title {title!r}")
+    warnings.append(
+        f"player.character_id is missing (an older mod); mapped the English title "
+        f"{title!r} to {mapped!r} instead"
+    )
+    return mapped
+
+
+def _build_character(player: dict, *, warnings: list[str]) -> str:
+    character_id = player.get("character_id")
+    if character_id is None:
+        return _character_from_title(player, warnings=warnings)
+    if character_id not in _CHARACTER_IDS:
+        raise SnapshotError("player.character_id", f"unrecognized character id {character_id!r}")
+    return character_id
+
+
+# ---------------------------------------------------------------------------
 # Enemies
 # ---------------------------------------------------------------------------
 
@@ -557,12 +614,24 @@ def _resolve_room_type(state: dict, room_type: str | None) -> str:
 
     A combat state's own state_type always wins: an explicit `room_type`
     that disagrees with it is a caller bug, not an override
-    (task-11-fix-1.md M4). Only for `hand_select`, whose own state_type is
-    not a room type, does the caller-supplied `room_type` fill the gap.
+    (task-11-fix-1.md M4). Only for `hand_select` and an in-combat
+    `card_select`, whose own state_type is not a room type, does the
+    caller-supplied `room_type` fill the gap -- from the battle block's own
+    combat, i.e. the last combat state_type the caller saw (task-11b
+    requirement 3; unchanged mechanism, now also covering card_select).
+
+    A `card_select` that is not in combat has no business reaching this
+    combat-only builder at all, so it raises here rather than silently being
+    treated as if it were mid-fight.
     """
     state_type = _require_str(state, "state_type", "state_type")
     if state_type not in _RECOGNIZED_STATE_TYPES:
         raise SnapshotError("state_type", f"unrecognized state_type {state_type!r}")
+
+    if state_type == "card_select" and state.get("in_combat") is not True:
+        raise SnapshotError(
+            "in_combat", f"card_select requires in_combat=true, got {state.get('in_combat')!r}"
+        )
 
     if state_type in _COMBAT_ROOM_TYPES:
         if room_type is not None and room_type != state_type:
@@ -572,8 +641,108 @@ def _resolve_room_type(state: dict, room_type: str | None) -> str:
         return state_type
 
     if room_type not in _COMBAT_ROOM_TYPES:
-        raise SnapshotError("room_type", f"required for hand_select, got {room_type!r}")
+        raise SnapshotError("room_type", f"required for {state_type}, got {room_type!r}")
     return room_type
+
+
+# ---------------------------------------------------------------------------
+# Pending in-combat selection (schema section 1.1; task-11b requirements 3/4)
+# ---------------------------------------------------------------------------
+
+
+def _build_selection_source(
+    source: dict, *, path: str, warnings: list[str]
+) -> dict[str, str | None]:
+    """Which of source_card/source_potion/source_relic gets source.id; the
+    other two are null. A power or unknown source has no field for it at
+    all, so all three are null, with a warning (requirement 3)."""
+    result: dict[str, str | None] = {
+        "source_card": None,
+        "source_potion": None,
+        "source_relic": None,
+    }
+    source_type = source.get("type")
+    field = _SELECTION_SOURCE_FIELDS.get(source_type)
+    if field is None:
+        warnings.append(
+            f"{path}.source.type is {source_type!r}: the live snapshot has no field for a "
+            "power or unknown selection source, so source_card/source_potion/source_relic "
+            "are all null"
+        )
+        return result
+    result[field] = source.get("id")
+    return result
+
+
+def _build_played_card(
+    player: dict, source: dict, *, mod_warnings: list[str], warnings: list[str]
+) -> dict | None:
+    """The full Card in player.play_pile matched by the source card's uid
+    (controller ruling, schema section 1.1 `played_card`). Null, with a
+    warning, when the source is a card but no match is found -- including
+    when the mod does not report play_pile at all."""
+    if source.get("type") != "card":
+        return None
+    source_uid = source.get("uid")
+    play_pile = player.get("play_pile")
+    if play_pile is not None and not isinstance(play_pile, list):
+        raise SnapshotError(
+            "player.play_pile", f"expected an array, got {type(play_pile).__name__}"
+        )
+    for i, card in enumerate(play_pile or []):
+        if isinstance(card, dict) and card.get("uid") == source_uid:
+            return _build_card(card, path=f"player.play_pile[{i}]", warnings=mod_warnings)
+    warnings.append(
+        "pending_selection.played_card: no player.play_pile card matches the selection's "
+        "source card uid; played_card is null"
+    )
+    return None
+
+
+def _build_pending_selection(
+    state: dict, *, state_type: str, player: dict, mod_warnings: list[str], warnings: list[str]
+) -> dict | None:
+    """Schema section 1.1, built from the mod's `selection` object on the
+    hand_select/card_select screen, or None with a warning when an older mod
+    has no `selection` object at all (requirement 4: nothing invented)."""
+    screen = _require_dict(state, state_type, state_type)
+    selection = screen.get("selection")
+    if not isinstance(selection, dict):
+        warnings.append(
+            f"{state_type} has no selection object (an older mod); pending_selection is null"
+        )
+        return None
+
+    path = f"{state_type}.selection"
+    source = _require_dict(selection, "source", f"{path}.source")
+    source_fields = _build_selection_source(source, path=path, warnings=warnings)
+
+    cards = _require_list(screen, "cards", f"{state_type}.cards")
+    candidates = [
+        _build_card(c, path=f"{state_type}.cards[{i}]", warnings=mod_warnings)
+        for i, c in enumerate(cards)
+    ]
+
+    selected_uids = [
+        entry.get("uid") for entry in (selection.get("selected") or []) if isinstance(entry, dict)
+    ]
+
+    return {
+        "kind": _require_str(selection, "kind", f"{path}.kind"),
+        "pile": selection.get("pile"),
+        "prompt_key": selection.get("prompt_key"),
+        "source_card": source_fields["source_card"],
+        "source_potion": source_fields["source_potion"],
+        "source_relic": source_fields["source_relic"],
+        "played_card": _build_played_card(
+            player, source, mod_warnings=mod_warnings, warnings=warnings
+        ),
+        "candidates": candidates,
+        "min": _require_int(selection, "min", f"{path}.min"),
+        "max": _require_int(selection, "max", f"{path}.max"),
+        "can_skip": _require_bool(selection, "can_skip", f"{path}.can_skip"),
+        "selected_uids": selected_uids,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -588,80 +757,93 @@ def build_live_snapshot(
     room_type: str | None = None,
     known_top: list[dict] | None = None,
     known_bottom: list[dict] | None = None,
+    warnings: list[str] | None = None,
 ) -> dict:
     """Build a `sts2-live-snapshot/1` dict from one mod combat state payload.
 
     `state` is the mod's JSON for a `monster`/`elite`/`boss` state, or a
-    `hand_select` state (which still carries the full `battle` object).
-    `room_type` must be supplied explicitly for `hand_select` states, since
-    their own `state_type` is not one of monster/elite/boss; for a combat
-    state it defaults to `state["state_type"]` and must not disagree with it.
+    `hand_select` / in-combat `card_select` state (which still carries the
+    full `battle` object). `room_type` must be supplied explicitly for those
+    selection states, since their own `state_type` is not one of
+    monster/elite/boss; for a combat state it defaults to
+    `state["state_type"]` and must not disagree with it.
 
     `known_top` / `known_bottom` are the cards the player knowingly placed on
     top of / bottom of the draw pile (mod Pile Card Object shape), supplied
     by the caller -- the mod does not report this itself.
 
+    `warnings`, if given, receives one readable sentence per approximation
+    this builder makes (an older mod missing a field it now expects, a
+    selection source the schema has no field for...). These never go inside
+    the returned snapshot -- the converter rejects unknown keys -- so they
+    are only ever reported through this sink (task-11b requirement 0).
+
     Raises SnapshotError, naming the JSON path, for any required field that
     is missing, unreadable (an explicit mod null) or the wrong type.
-
-    A `hand_select` state always raises: until the mod reports a selection's
-    source card and bounds (a later task), this builder cannot fill schema
-    section 1.1's `pending_selection` without inventing data
-    (task-11-fix-1.md I3 / controller ruling).
     """
+    if warnings is None:
+        warnings = []
+
     run = _require_dict(state, "run", "run")
     player = _require_dict(state, "player", "player")
     battle = _require_dict(state, "battle", "battle")
-    warnings = state.get("warnings") or []
+    mod_warnings = state.get("warnings") or []
 
     resolved_room_type = _resolve_room_type(state, room_type)
+    state_type = state.get("state_type")
 
-    if state.get("state_type") == "hand_select":
-        raise SnapshotError(
-            "hand_select", "the mod does not report this selection's source card and bounds yet"
-        )
+    character = _build_character(player, warnings=warnings)
 
-    character = _require_str(player, "character", "player.character")
-
-    enemies = _build_enemies(battle, warnings=warnings)
+    enemies = _build_enemies(battle, warnings=mod_warnings)
     if not enemies:
         raise SnapshotError("enemies", "no alive or reviving enemy in this combat state")
+
+    if state_type in _SELECTION_STATE_TYPES:
+        pending_selection = _build_pending_selection(
+            state,
+            state_type=state_type,
+            player=player,
+            mod_warnings=mod_warnings,
+            warnings=warnings,
+        )
+    else:
+        pending_selection = None
 
     return {
         "schema": SCHEMA,
         "game_version": game_version,
-        "character": _strip_category_prefix(character),
+        "character": character,
         "ascension": _require_int(run, "ascension", "run.ascension"),
         "act": _require_int(run, "act", "run.act"),
         "floor": _require_int(run, "floor", "run.floor"),
         "room_type": resolved_room_type,
         "round": _require_int(battle, "round", "battle.round"),
-        "player": _build_player(player, warnings=warnings),
-        "hand": _build_hand(player, warnings=warnings),
-        "draw_pile": _build_draw_pile(player, warnings=warnings),
+        "player": _build_player(player, warnings=mod_warnings),
+        "hand": _build_hand(player, warnings=mod_warnings),
+        "draw_pile": _build_draw_pile(player, warnings=mod_warnings),
         "discard_pile": _build_ordered_pile(
             player,
             unordered_key="discard_pile",
             ordered_key="discard_pile_ordered",
             path="discard_pile",
-            warnings=warnings,
+            warnings=mod_warnings,
         ),
         "exhaust_pile": _build_ordered_pile(
             player,
             unordered_key="exhaust_pile",
             ordered_key="exhaust_pile_ordered",
             path="exhaust_pile",
-            warnings=warnings,
+            warnings=mod_warnings,
         ),
         "known_draw_top": [
-            _build_card(c, path=f"known_draw_top[{i}]", warnings=warnings)
+            _build_card(c, path=f"known_draw_top[{i}]", warnings=mod_warnings)
             for i, c in enumerate(known_top or [])
         ],
         "known_draw_bottom": [
-            _build_card(c, path=f"known_draw_bottom[{i}]", warnings=warnings)
+            _build_card(c, path=f"known_draw_bottom[{i}]", warnings=mod_warnings)
             for i, c in enumerate(known_bottom or [])
         ],
         "enemies": enemies,
         "history": _build_history(battle),
-        "pending_selection": None,
+        "pending_selection": pending_selection,
     }

@@ -35,7 +35,7 @@ _FINGERPRINT_KEYS = ("state_type", "battle", "player", "run")
 
 class DecisionKind(Enum):
     COMBAT = "combat"
-    HAND_SELECT = "hand_select"
+    COMBAT_SELECT = "combat_select"
     NON_COMBAT = "non_combat"
     NONE = "none"
 
@@ -47,20 +47,32 @@ class Decision:
     room_type: str | None
 
 
+def _is_combat_selection(state: dict) -> bool:
+    """hand_select is always mid-combat (the mod's own in_combat is always
+    true for it). A card_select grid or choose-a-card screen is a combat
+    selection too, but only when the mod's in_combat says this one opened
+    mid-fight; the same screen outside combat (a deck transform, a shop
+    removal...) is not (task-11b)."""
+    state_type = state.get("state_type")
+    return state_type == "hand_select" or (
+        state_type == "card_select" and state.get("in_combat") is True
+    )
+
+
 def is_settled(state: dict) -> bool:
     """True once the state is done animating/resolving and it's the player's turn to act.
 
     `is_resolving` is the base signal. Combat additionally needs the play
     phase to be active and it to be the player's turn (not, say, mid-enemy
     turn). Menu, no-run and FTUE payloads never carry `is_resolving` at all;
-    they are settled by definition since only combat and hand_select ever
-    need the flag.
+    they are settled by definition since only combat and a combat selection
+    (hand_select, or an in-combat card_select) ever need the flag.
     """
     state_type = state.get("state_type")
     is_resolving = state.get("is_resolving")
 
     if is_resolving is None:
-        return state_type not in COMBAT_STATE_TYPES and state_type != "hand_select"
+        return state_type not in COMBAT_STATE_TYPES and not _is_combat_selection(state)
 
     if is_resolving:
         return False
@@ -82,8 +94,8 @@ def classify(state: dict) -> Decision:
     if state_type in COMBAT_STATE_TYPES:
         return Decision(kind=DecisionKind.COMBAT, state_type=state_type, room_type=state_type)
 
-    if state_type == "hand_select":
-        return Decision(kind=DecisionKind.HAND_SELECT, state_type=state_type, room_type=None)
+    if _is_combat_selection(state):
+        return Decision(kind=DecisionKind.COMBAT_SELECT, state_type=state_type, room_type=None)
 
     if state_type in NON_COMBAT_STATE_TYPES:
         return Decision(kind=DecisionKind.NON_COMBAT, state_type=state_type, room_type=None)

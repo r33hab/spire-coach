@@ -82,7 +82,8 @@
     }
   },
   "player": {
-    "character": "IRONCLAD",
+    "character": "The Ironclad",
+    "character_id": "IRONCLAD",
     "hp": 61,
     "max_hp": 80,
     "block": 5,

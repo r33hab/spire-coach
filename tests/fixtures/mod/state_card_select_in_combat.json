@@ -1,0 +1,73 @@
+{
+  "state_type": "card_select",
+  "mod_version": "0.5.0",
+  "mod_commit": "032ebde",
+  "schema_version": 5,
+  "rooms_entered": 3,
+  "action_log_seq": 16,
+  "is_resolving": false,
+  "in_combat": true,
+  "battle": {
+    "round": 2,
+    "turn": "player",
+    "is_play_phase": false,
+    "enemies": [
+      {
+        "entity_id": "JAW_WORM_0",
+        "combat_id": 42,
+        "name": "Jaw Worm",
+        "alive": true,
+        "hp": 30,
+        "max_hp": 44,
+        "block": 0,
+        "status": [],
+        "intents": []
+      }
+    ],
+    "allies": []
+  },
+  "card_select": {
+    "screen_type": "select",
+    "prompt": "Choose a card to put on top of your draw pile.",
+    "cards": [
+      {"index": 0, "uid": "IRON_WAVE#0", "id": "IRON_WAVE", "name": "Iron Wave", "type": "Skill", "cost": "1", "star_cost": null, "description": "Gain 5 Block. Deal 5 damage.", "is_upgraded": false, "selected": false, "keywords": [], "enchantment": null, "affliction": null, "fields": {}, "unplayable": false}
+    ],
+    "selected_count": 0,
+    "required_count": 1,
+    "min_select": 1,
+    "max_select": 1,
+    "preview_showing": false,
+    "can_confirm": false,
+    "can_cancel": false,
+    "selection": {
+      "kind": "GRID",
+      "pile": "DISCARD",
+      "prompt_key": "cards.HEADBUTT.selectionScreenPrompt",
+      "source": {"type": "card", "id": "HEADBUTT", "uid": "HEADBUTT#0"},
+      "min": 1, "max": 1,
+      "can_skip": false,
+      "selected": []
+    }
+  },
+  "run": {"act": 1, "floor": 6, "ascension": 0},
+  "player": {
+    "character_id": "IRONCLAD",
+    "character": "The Ironclad",
+    "hp": 70,
+    "max_hp": 80,
+    "block": 0,
+    "gold": 99,
+    "energy": 1,
+    "max_energy": 3,
+    "hand": [],
+    "draw_pile": [],
+    "discard_pile": [],
+    "exhaust_pile": [],
+    "status": [],
+    "relics": [],
+    "potions": [],
+    "max_potion_slots": 3,
+    "deck_count": 10,
+    "deck": []
+  }
+}
