@@ -923,6 +923,33 @@ def test_a_position_first_seen_after_the_log_moved_on_is_never_bound_to_a_move(m
     assert engine.check_calls == []  # nothing is checked from P1, nor into it
 
 
+def test_a_selection_between_two_ambiguous_first_sights_is_not_graded(make_session):
+    # Neither the screen nor the position after it has a known seq (each was first
+    # seen after the log had moved on), so "no move in between" cannot be shown and
+    # the diff of the two could mix the pick with a move.
+    def respond(live):
+        if live["pending_selection"] is not None:
+            strike = select(0, "Exhaust Strike")
+            return analysis_of([strike, select(1, "Exhaust True Grit")], best=strike)
+        return standard_analysis(live)
+
+    bridge = FakeBridge()
+    engine = FakeEngine(respond)
+    session, published = make_session(bridge, engine)
+    settle(session, bridge, combat(seq=12))
+    step_until(session, advising(published))
+
+    after_whirlwind = combat(seq=13, hand=("c1", "c3", "c4"))
+    bridge.entries.append(play(13, "c2"))  # its effect opens an exhaust screen
+    settle(session, bridge, hand_select_over(after_whirlwind, 13, ("c1", "c4")))
+    step_until(session, lambda: len(engine.analyze_calls) == 2 and advising(published)())
+    bridge.entries.append(play(14, "c4"))  # clicked before the next position's first poll
+    settle(session, bridge, after_exhausting(after_whirlwind, 14, "c1"))
+    step_until(session, lambda: len(engine.analyze_calls) == 3 and advising(published)())
+
+    assert [g["played"]["kind"] for g in grade_history(published)] == ["card", "card"]
+
+
 def test_two_moves_read_in_one_poll_are_each_graded_on_their_own_position_in_order(
     make_session, tmp_path
 ):
