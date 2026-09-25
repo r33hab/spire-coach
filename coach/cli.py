@@ -14,15 +14,18 @@ import contextlib
 import json
 import math
 import signal
+import socket
 import subprocess
 import sys
 import threading
 import time
+import webbrowser
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import uvicorn
 
+from coach import dashboard
 from coach.bridge.client import BridgeAuthError, BridgeError, ModClient
 from coach.bridge.versions import VersionStatus, check_versions, read_game_version
 from coach.capture import capture_loop
@@ -317,6 +320,33 @@ def cmd_mod_enable(backup_root: Path, *, is_running: Callable[[], bool] = game_i
 
 
 # --- coach -----------------------------------------------------------------------------
+
+
+def cmd_dashboard(config: Config, *, port: int, root: Path, open_browser: bool) -> int:
+    """Serve the dashboard on 127.0.0.1:`port` until Ctrl-C (read-only; see coach.dashboard)."""
+    with socket.socket() as probe:  # uvicorn exits silently on a taken port: say it first
+        try:
+            probe.bind((HOST, port))
+        except OSError:
+            _say(
+                f"Port {port} is taken: is a dashboard already running? Pick another with --port.",
+                error=True,
+            )
+            return 1
+    client = ModClient(config.base_url, config.token, timeout_s=dashboard.PROBE_TIMEOUT_S)
+    model_path = config.data_dir / "models" / "strategy" / "model.json"
+    app = dashboard.create_app(dashboard.snapshot_source(root, client, model_path))
+    server = create_server(app, port=port)
+    url = f"http://{HOST}:{port}/"
+    _say(f"The dashboard is at {url} (training job: {root})")
+    _say("Press Ctrl-C to stop it.")
+    if open_browser:
+        threading.Timer(1.0, webbrowser.open, args=(url,)).start()
+    try:
+        server.run()
+    finally:
+        client.close()
+    return 0
 
 
 class CoachError(Exception):
@@ -678,14 +708,32 @@ def _build_parser() -> argparse.ArgumentParser:
         help="show the best move at once, or quiz: hide it until you move (default: %(default)s)",
     )
 
+    dashboard_parser = subparsers.add_parser(
+        "dashboard", help="a local page with training progress, the game and the coach"
+    )
+    dashboard_parser.add_argument(
+        "--port",
+        type=_port,
+        default=dashboard.DEFAULT_DASHBOARD_PORT,
+        help="the dashboard's port on 127.0.0.1 (default: %(default)s)",
+    )
+    dashboard_parser.add_argument(
+        "--training-root",
+        type=Path,
+        default=None,
+        help=f"the training job's folder (default: ${dashboard.TRAINING_ROOT_ENV}, else the first "
+        "of the training worktree's and the sts2 checkout's runs/stage2 that exists)",
+    )
+    dashboard_parser.add_argument(
+        "--no-open", action="store_true", help="do not open the page in the browser"
+    )
+
     return parser
 
 
 def _current_operation(args: argparse.Namespace) -> str:
     return (
-        getattr(args, "saves_command", None)
-        or getattr(args, "mod_command", None)
-        or args.command
+        getattr(args, "saves_command", None) or getattr(args, "mod_command", None) or args.command
     )
 
 
@@ -722,6 +770,13 @@ def main(argv: list[str] | None = None) -> int:
                 port=args.port,
                 window=not args.no_window,
                 mode=args.mode,
+            )
+        if args.command == "dashboard":
+            return cmd_dashboard(
+                config,
+                port=args.port,
+                root=args.training_root or dashboard.training_root(),
+                open_browser=not args.no_open,
             )
     except BridgeAuthError as exc:
         print(str(exc), file=sys.stderr)

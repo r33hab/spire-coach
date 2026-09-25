@@ -1,0 +1,396 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spire Coach Dashboard</title>
+<style>
+  :root {
+    --night: #141c29; --night-2: #19222f; --stone: #222c3b; --stone-2: #313d4f;
+    --bone: #ede4cf; --ash: #939fb1; --ash-dim: #6d798b;
+    --best: #5cc98e; --good: #a6cb6c; --caution: #f1c350; --mistake: #f08a3c; --danger: #e5574d;
+    --self: #7aa7e8;
+    --slab: Rockwell, "Rockwell Nova", "Roboto Slab", Charter, Georgia, serif;
+    --sans: system-ui, -apple-system, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--night); color: var(--bone); font: 14px/1.45 var(--sans); }
+  main { max-width: 1180px; margin: 0 auto; padding: 20px 16px 40px; }
+  header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  h1 { font: 700 24px/1.2 var(--slab); margin: 0; letter-spacing: .2px; }
+  h2 { font: 600 12px/1 var(--sans); text-transform: uppercase; letter-spacing: .9px; color: var(--ash); margin: 0 0 12px; }
+  .muted { color: var(--ash); } .dim { color: var(--ash-dim); }
+  .chips { display: flex; gap: 8px; flex-wrap: wrap; margin: 14px 0 18px; }
+  .chip { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 999px;
+          background: var(--stone); font-size: 13px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--ash-dim); flex: none; }
+  .dot.on { background: var(--best); box-shadow: 0 0 0 3px rgba(92,201,142,.18); }
+  .dot.warn { background: var(--caution); } .dot.bad { background: var(--danger); }
+  .grid { display: grid; gap: 14px; grid-template-columns: repeat(12, 1fr); }
+  .card { background: var(--night-2); border: 1px solid var(--stone); border-radius: 12px; padding: 16px; min-width: 0; }
+  .span-12 { grid-column: span 12; } .span-8 { grid-column: span 8; } .span-6 { grid-column: span 6; } .span-4 { grid-column: span 4; }
+  @media (max-width: 860px) { .span-8, .span-6, .span-4 { grid-column: span 12; } }
+  .now-title { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .now-title .big { font: 700 20px/1.25 var(--slab); }
+  .bar { height: 12px; background: var(--stone); border-radius: 6px; overflow: hidden; margin: 12px 0 6px; }
+  .bar > div { height: 100%; width: 0; background: linear-gradient(90deg, #3f9f6c, var(--best)); transition: width .6s; }
+  .row { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; font-size: 13px; }
+  .steps { display: flex; gap: 6px; margin-top: 14px; flex-wrap: wrap; }
+  .step { flex: 1 1 150px; padding: 8px 10px; border-radius: 8px; background: var(--stone); color: var(--ash); font-size: 12.5px; }
+  .step b { display: block; color: var(--bone); font-weight: 600; font-size: 13px; }
+  .step.active { background: #24473a; color: #cfeedd; outline: 1px solid var(--best); }
+  .step.active b { color: #fff; }
+  .step.done { opacity: .6; }
+  .stat { display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; font-size: 13.5px; }
+  .stat .v { text-align: right; font-variant-numeric: tabular-nums; }
+  .headline { font: 700 30px/1.1 var(--slab); font-variant-numeric: tabular-nums; }
+  .pair { display: flex; gap: 28px; flex-wrap: wrap; margin: 6px 0 4px; }
+  .pair .lbl { font-size: 12px; color: var(--ash); }
+  svg { display: block; width: 100%; height: auto; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--ash); margin-top: 8px; }
+  .legend i { display: inline-block; width: 16px; height: 0; border-top: 2px solid; vertical-align: middle; margin-right: 5px; }
+  .legend i.pt { width: 9px; height: 9px; border: 0; border-radius: 50%; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+  th, td { padding: 7px 8px; text-align: right; border-bottom: 1px solid var(--stone); white-space: nowrap; }
+  th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: left; }
+  th { color: var(--ash); font-weight: 600; font-size: 12px; }
+  .scroll { overflow-x: auto; }
+  .tag { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; background: var(--stone); color: var(--ash); }
+  .tag.promoted { background: rgba(92,201,142,.18); color: var(--best); }
+  .tag.rolled { background: rgba(240,138,60,.18); color: var(--mistake); }
+  .tag.pending { background: rgba(241,195,80,.16); color: var(--caution); }
+  pre { margin: 0; max-height: 260px; overflow: auto; font: 12px/1.5 var(--mono); color: #c9c2b0; white-space: pre-wrap; word-break: break-word; }
+  code { font: 12.5px var(--mono); background: var(--stone); padding: 1px 6px; border-radius: 4px; }
+  a { color: var(--best); }
+  .move { font: 700 18px/1.3 var(--slab); margin: 4px 0; }
+  .banner { display: none; margin: 0 0 14px; padding: 10px 14px; border-radius: 10px; background: rgba(229,87,77,.15); color: #f3b1ab; }
+  .explain { font-size: 12.5px; color: var(--ash); margin-top: 10px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Spire Coach · Dashboard</h1>
+    <span class="muted" id="updated">connecting…</span>
+  </header>
+  <div class="banner" id="banner">The dashboard server stopped answering. Is <code>spire-coach dashboard</code> still running?</div>
+  <div class="chips">
+    <span class="chip"><span class="dot" id="dot-game"></span><span id="chip-game">Game</span></span>
+    <span class="chip"><span class="dot" id="dot-coach"></span><span id="chip-coach">Coach</span></span>
+    <span class="chip"><span class="dot" id="dot-train"></span><span id="chip-train">Training</span></span>
+  </div>
+
+  <div class="grid">
+    <section class="card span-12" id="now-card">
+      <h2>Training right now</h2>
+      <div class="now-title"><span class="big" id="now-title">…</span><span class="muted" id="now-rate"></span></div>
+      <div class="bar"><div id="now-bar"></div></div>
+      <div class="row"><span id="now-count"></span><span class="muted" id="now-eta"></span></div>
+      <div class="steps" id="steps"></div>
+      <div class="explain" id="now-who"></div>
+    </section>
+
+    <section class="card span-6">
+      <h2>Best so far (the champion)</h2>
+      <div class="move" id="champ-name">…</div>
+      <div class="pair">
+        <div><div class="headline" id="champ-floor">–</div><div class="lbl" id="champ-floor-ci">mean floor reached</div></div>
+        <div><div class="headline" id="champ-boss">–</div><div class="lbl" id="champ-boss-ci">Act 1 boss killed</div></div>
+      </div>
+      <div class="explain" id="champ-note">Measured on 200 fixed test seeds. A new model replaces it only when it is clearly better.</div>
+    </section>
+
+    <section class="card span-6">
+      <h2>Totals and health</h2>
+      <div class="stat" id="totals"></div>
+    </section>
+
+    <section class="card span-6">
+      <h2>Learning curve · mean floor reached</h2>
+      <div id="chart-floor"></div>
+      <div class="legend">
+        <span><i style="border-color:var(--self)"></i>self-play runs</span>
+        <span><i class="pt" style="background:var(--best)"></i>test on 200 seeds (95% CI)</span>
+        <span><i style="border-color:var(--caution);border-top-style:dashed"></i>rules baseline</span>
+      </div>
+    </section>
+
+    <section class="card span-6">
+      <h2>Learning curve · Act 1 boss kills</h2>
+      <div id="chart-boss"></div>
+      <div class="legend">
+        <span><i style="border-color:var(--self)"></i>self-play runs</span>
+        <span><i class="pt" style="background:var(--best)"></i>test on 200 seeds (95% CI)</span>
+        <span><i style="border-color:var(--caution);border-top-style:dashed"></i>rules baseline</span>
+      </div>
+    </section>
+
+    <section class="card span-12">
+      <h2>Generations</h2>
+      <div class="scroll"><table>
+        <thead><tr><th>Gen</th><th>Played by</th><th>Runs</th><th>Self-play floor</th><th>Self-play boss</th><th>Test floor (95% CI)</th><th>Test boss</th><th>Result</th><th>Took</th></tr></thead>
+        <tbody id="gens"><tr><td colspan="9" class="muted">No generation has finished yet.</td></tr></tbody>
+      </table></div>
+    </section>
+
+    <section class="card span-6">
+      <h2>Coach</h2>
+      <div id="coach"></div>
+    </section>
+
+    <section class="card span-6">
+      <h2>Exported model (what the coach will use)</h2>
+      <div id="model"></div>
+    </section>
+
+    <section class="card span-12">
+      <h2>Training loop log</h2>
+      <pre id="log"></pre>
+      <div class="explain" id="log-where"></div>
+    </section>
+  </div>
+</main>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const num = (x) => typeof x === "number" && isFinite(x);
+const f1 = (x) => num(x) ? x.toFixed(1) : "–";
+const f2 = (x) => num(x) ? x.toFixed(2) : "–";
+const pct = (x) => num(x) ? (100 * x).toFixed(1) + "%" : "–";
+const int = (x) => num(x) ? Math.round(x).toLocaleString() : "–";
+const count = (o) => o && typeof o === "object" ? Object.keys(o).length : 0;
+const total = (o) => o && typeof o === "object" ? Object.values(o).reduce((a, b) => a + (num(b) ? b : 0), 0) : 0;
+const clock = (ms) => new Date(ms).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
+const dur = (s) => !num(s) ? "–" : s < 90 ? Math.round(s) + " s" : s < 5400 ? Math.round(s / 60) + " min" : (s / 3600).toFixed(1) + " h";
+const ago = (ms) => { const s = Math.max(0, Math.round((Date.now() - ms) / 1000)); return s < 60 ? s + " s ago" : s < 3600 ? Math.round(s / 60) + " min ago" : (s / 3600).toFixed(1) + " h ago"; };
+
+const PHASES = [
+  ["generating", "1 · Play", "self-play runs in the simulator"],
+  ["training", "2 · Learn", "fit the model on the runs"],
+  ["evaluating", "3 · Test", "play the 200 fixed test seeds"],
+  ["promoting", "4 · Decide", "keep it only if clearly better"],
+];
+const PHASE_TITLE = {generating: "playing runs", training: "training the model", evaluating: "testing on the 200 seeds",
+  promoting: "deciding whether to keep it", idle: "idle", done: "finished", stopped: "stopped"};
+
+let lastFetch = 0, lastData = null;
+
+function setDot(id, state) { const d = $(id); d.className = "dot" + (state ? " " + state : ""); }
+
+function renderChips(d) {
+  const g = d.game || {}, c = d.coach || {}, t = d.training || {};
+  setDot("dot-game", g.running ? "on" : "");
+  $("chip-game").textContent = g.running ? `Game: running${g.profile != null ? " · profile " + g.profile : ""}` : "Game: not running";
+  setDot("dot-coach", c.running ? "on" : "");
+  $("chip-coach").textContent = c.running ? "Coach: " + ((c.state || {}).status_text || "running") : "Coach: off";
+  if (!t.found) { setDot("dot-train", "bad"); $("chip-train").textContent = "Training: no job found"; return; }
+  const s = t.status || {};
+  const ok = t.running && s.phase !== "stopped";
+  setDot("dot-train", ok ? "on" : s.phase === "done" ? "" : "warn");
+  $("chip-train").textContent = ok ? `Training: generation ${s.generation} · ${PHASE_TITLE[s.phase] || s.phase}` : `Training: ${t.running ? PHASE_TITLE[s.phase] || s.phase : "loop not running"}`;
+}
+
+function lastPlayingLine(log) {
+  for (let i = log.length - 1; i >= 0; i--) {
+    const m = /gen (\d+): playing (\d+) runs with (.*)$/.exec(log[i]);
+    if (m) return {gen: +m[1], runs: +m[2], policy: m[3]};
+  }
+  return null;
+}
+
+function describePolicy(text) {
+  if (!text) return "";
+  const kind = /'kind': '([^']+)'/.exec(text), eps = /'eps': ([0-9.]+)/.exec(text), gen = /'generation': (\d+)/.exec(text);
+  if (kind && kind[1] === "rules") return `the hand-written rules${eps ? `, with ${Math.round(100 * +eps[1])}% random choices to explore` : ""}`;
+  if (gen) return `the generation ${gen[1]} model${eps ? `, with ${Math.round(100 * +eps[1])}% random choices` : ""}`;
+  return text;
+}
+
+function renderNow(t) {
+  if (!t.found) {
+    $("now-title").textContent = "No training job found";
+    $("now-who").innerHTML = `Looked in <code>${esc(t.root)}</code>. Start the loop, or point the dashboard at it with <code>--training-root</code>.`;
+    return;
+  }
+  const s = t.status || {}, per = t.runs_per_generation || 0, done = s.runs_this_generation || 0, rate = s.runs_per_hour;
+  $("now-title").textContent = `Generation ${s.generation} · ${PHASE_TITLE[s.phase] || s.phase}${t.running ? "" : " (loop not running)"}`;
+  $("now-rate").textContent = num(rate) ? `${int(rate)} runs/hour` : "";
+  const playing = s.phase === "generating";
+  $("now-bar").style.width = (per ? Math.min(100, 100 * (playing ? done / per : 1)) : 0) + "%";
+  $("now-count").textContent = playing ? `${int(done)} of ${int(per)} runs played` : `${int(per)} runs played`;
+  $("now-eta").textContent = playing && num(rate) && rate > 0 && per > done ? `self-play done around ${clock(Date.now() + 3600e3 * (per - done) / rate)}` : "";
+  const at = PHASES.findIndex((p) => p[0] === s.phase);
+  $("steps").innerHTML = PHASES.map((p, i) => `<div class="step${i === at ? " active" : i < at ? " done" : ""}"><b>${p[1]}</b>${p[2]}</div>`).join("");
+  const play = lastPlayingLine(t.log || []);
+  const beat = s.last_update ? Date.parse(s.last_update) : NaN;
+  $("now-who").textContent = (play && play.gen === s.generation ? `This generation is played by ${describePolicy(play.policy)}. ` : "") +
+    (isFinite(beat) ? `Last status update ${ago(beat)}.` : "");
+}
+
+function renderChampion(t) {
+  const s = t.status || {}, ch = s.champion || {}, e = ch.eval || {};
+  $("champ-name").textContent = !t.found ? "–" : ch.generation == null ? "The hand-written rules (baseline)" : `The generation ${ch.generation} model`;
+  $("champ-floor").textContent = f1(e.mean_floor);
+  $("champ-floor-ci").textContent = e.ci95 ? `mean floor reached · 95% CI ${f1(e.ci95[0])}–${f1(e.ci95[1])}` : "mean floor reached";
+  $("champ-boss").textContent = pct(e.boss_kill_rate);
+  $("champ-boss-ci").textContent = e.wilson95 ? `Act 1 boss killed · 95% CI ${pct(e.wilson95[0])}–${pct(e.wilson95[1])}` : "Act 1 boss killed";
+  const asc = s.ascension != null ? `Ascension ${s.ascension}${s.ascension_stands_in_for ? ` (standing in for ${s.ascension_stands_in_for})` : ""}` : "";
+  $("champ-note").textContent = `Measured on ${e.n || 200} fixed test seeds${asc ? ", " + asc : ""}. A new model replaces it only when it is clearly better. The floor counts to 17 in Act 1; 18 means the boss died.`;
+}
+
+function renderTotals(t) {
+  if (!t.found) { $("totals").innerHTML = ""; return; }
+  const s = t.status || {}, gens = t.generations || [];
+  const retries = gens.reduce((a, g) => a + (g.retries || 0), 0);
+  const rows = [
+    ["Runs played in total", int(s.games_played_total)],
+    ["Generations finished", int(gens.filter((g) => g.result).length)],
+    ["Models promoted", int(gens.filter((g) => g.result === "promoted").length)],
+    ["Simulator speed", num(s.runs_per_hour) ? int(s.runs_per_hour) + " runs/h" : "–"],
+    ["Fight budget", s.combat_budget || "–"],
+    ["Worker restarts", int(s.worker_restarts || 0)],
+    ["Crashed runs retried", int(retries)],
+    ["Seeds set aside (crashed twice)", int(count(s.quarantined_seeds))],
+    ["Screens the policy did not know", int(total(s.unknown_decisions))],
+    ["Loop process", t.running ? `running (pid ${t.pid})` : t.pid ? `not running (pid ${t.pid})` : "not running"],
+  ];
+  $("totals").innerHTML = rows.map(([k, v]) => `<span class="muted">${esc(k)}</span><span class="v">${esc(v)}</span>`).join("");
+}
+
+function chart(el, opts) {
+  const W = 560, H = 250, L = 44, R = 14, T = 12, B = 30;
+  const gens = opts.points.map((p) => p.gen);
+  const maxGen = Math.max(4, ...gens, opts.currentGen || 0);
+  const vals = [];
+  opts.points.forEach((p) => { [p.self, p.test, p.lo, p.hi].forEach((v) => num(v) && vals.push(v)); });
+  const b = opts.baseline;
+  if (b) [b.mean, b.lo, b.hi].forEach((v) => num(v) && vals.push(v));
+  let lo = vals.length ? Math.min(...vals) : opts.min, hi = vals.length ? Math.max(...vals) : opts.max;
+  const pad = Math.max((hi - lo) * 0.15, opts.minPad);
+  lo = Math.max(opts.floorMin, lo - pad); hi = Math.min(opts.floorMax, hi + pad);
+  if (hi - lo < opts.minPad * 2) { hi = Math.min(opts.floorMax, lo + opts.minPad * 2); }
+  const x = (g) => L + (W - L - R) * (g / maxGen), y = (v) => T + (H - T - B) * (1 - (v - lo) / (hi - lo));
+  let s = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(opts.label)}">`;
+  const ticks = 5;
+  for (let i = 0; i <= ticks; i++) {
+    const v = lo + (hi - lo) * i / ticks, yy = y(v);
+    s += `<line x1="${L}" x2="${W - R}" y1="${yy}" y2="${yy}" stroke="#222c3b"/>`;
+    s += `<text x="${L - 7}" y="${yy + 4}" fill="#6d798b" font-size="11" text-anchor="end">${opts.fmt(v)}</text>`;
+  }
+  const step = maxGen > 24 ? Math.ceil(maxGen / 12) : 1;
+  for (let g = 0; g <= maxGen; g += step) s += `<text x="${x(g)}" y="${H - 10}" fill="#6d798b" font-size="11" text-anchor="middle">${g}</text>`;
+  s += `<text x="${W - R}" y="${H - 10}" fill="#6d798b" font-size="11" text-anchor="end" dy="-14">generation</text>`;
+  if (b && num(b.mean)) {
+    if (num(b.lo) && num(b.hi)) s += `<rect x="${L}" width="${W - L - R}" y="${y(b.hi)}" height="${Math.max(1, y(b.lo) - y(b.hi))}" fill="rgba(241,195,80,.08)"/>`;
+    s += `<line x1="${L}" x2="${W - R}" y1="${y(b.mean)}" y2="${y(b.mean)}" stroke="#f1c350" stroke-width="1.5" stroke-dasharray="6 5"/>`;
+  }
+  const self = opts.points.filter((p) => num(p.self));
+  if (self.length > 1) s += `<polyline fill="none" stroke="#7aa7e8" stroke-width="2" points="${self.map((p) => `${x(p.gen)},${y(p.self)}`).join(" ")}"/>`;
+  self.forEach((p) => { s += `<circle cx="${x(p.gen)}" cy="${y(p.self)}" r="3" fill="#7aa7e8"/>`; });
+  opts.points.filter((p) => num(p.test)).forEach((p) => {
+    const color = p.result === "promoted" ? "#5cc98e" : p.result === "rolled back" ? "#f08a3c" : p.result ? "#939fb1" : "#f1c350";
+    if (num(p.lo) && num(p.hi)) s += `<line x1="${x(p.gen)}" x2="${x(p.gen)}" y1="${y(p.hi)}" y2="${y(p.lo)}" stroke="${color}" stroke-width="2" opacity=".7"/>`;
+    s += `<circle cx="${x(p.gen)}" cy="${y(p.test)}" r="5.5" fill="${color}" stroke="#19222f" stroke-width="2"><title>generation ${p.gen}: ${opts.fmt(p.test)} (${p.result || "deciding"})</title></circle>`;
+  });
+  if (!opts.points.some((p) => num(p.test) || num(p.self))) {
+    s += `<text x="${(L + W - R) / 2}" y="${T + 26}" fill="#939fb1" font-size="13" text-anchor="middle">The first points appear when generation 0 has finished.</text>`;
+  }
+  el.innerHTML = s + "</svg>";
+}
+
+function renderCharts(t) {
+  const gens = t.generations || [], b = t.baseline;
+  const cur = (t.status || {}).generation || 0;
+  chart($("chart-floor"), {
+    label: "mean floor by generation", fmt: (v) => v.toFixed(1), min: 10, max: 16, minPad: 0.6, floorMin: 1, floorMax: 18, currentGen: cur,
+    baseline: b ? {mean: b.mean_floor, lo: (b.ci95 || [])[0], hi: (b.ci95 || [])[1]} : null,
+    points: gens.map((g) => ({gen: g.generation, self: (g.selfplay || {}).mean_floor, test: (g.eval || {}).mean_floor,
+      lo: ((g.eval || {}).ci95 || [])[0], hi: ((g.eval || {}).ci95 || [])[1], result: g.result})),
+  });
+  chart($("chart-boss"), {
+    label: "boss kill rate by generation", fmt: (v) => (100 * v).toFixed(0) + "%", min: 0, max: 0.2, minPad: 0.03, floorMin: 0, floorMax: 1, currentGen: cur,
+    baseline: b ? {mean: b.boss_kill_rate, lo: (b.wilson95 || [])[0], hi: (b.wilson95 || [])[1]} : null,
+    points: gens.map((g) => ({gen: g.generation, self: (g.selfplay || {}).boss_kill_rate, test: (g.eval || {}).boss_kill_rate,
+      lo: ((g.eval || {}).wilson95 || [])[0], hi: ((g.eval || {}).wilson95 || [])[1], result: g.result})),
+  });
+}
+
+function renderGenerations(t) {
+  const gens = (t.generations || []).filter((g) => g.selfplay || g.eval || g.result).slice().reverse();
+  if (!gens.length) { $("gens").innerHTML = `<tr><td colspan="9" class="muted">No generation has finished yet.</td></tr>`; return; }
+  $("gens").innerHTML = gens.map((g) => {
+    const sp = g.selfplay || {}, ev = g.eval || {};
+    const by = sp.played_by == null ? (g.selfplay ? "rules" : "–") : `gen ${sp.played_by} model`;
+    const tag = g.result === "promoted" ? `<span class="tag promoted">promoted</span>` : g.result === "rolled back" ? `<span class="tag rolled">rolled back</span>`
+      : g.result ? `<span class="tag">not promoted</span>` : `<span class="tag pending">in progress</span>`;
+    const ci = ev.ci95 ? ` <span class="dim">(${f1(ev.ci95[0])}–${f1(ev.ci95[1])})</span>` : "";
+    return `<tr><td>${g.generation}</td><td>${esc(by)}</td><td>${int(sp.runs)}</td><td>${f2(sp.mean_floor)}</td><td>${pct(sp.boss_kill_rate)}</td>` +
+      `<td>${f2(ev.mean_floor)}${ci}</td><td>${pct(ev.boss_kill_rate)}</td><td>${tag}</td><td>${dur(sp.seconds)}</td></tr>`;
+  }).join("");
+}
+
+function renderCoach(c) {
+  if (!c.running) {
+    $("coach").innerHTML = `<div class="muted">Not running. With the game open, start it with <code>uv run spire-coach coach</code> in <code>~/Documents/git/spire-coach</code>.</div>`;
+    return;
+  }
+  const st = c.state || {}, rec = st.recommendation, g = st.last_grade, run = st.run || {};
+  let h = `<div class="muted">${esc(st.status_text || st.status)}${run.floor != null ? ` · Act ${esc(run.act)}, floor ${esc(run.floor)}` : ""}</div>`;
+  if (rec && rec.best) {
+    h += `<div class="move">${esc(rec.best.label)}</div><div class="muted">expected HP loss ${f1(rec.expected_hp_loss)} · death risk ${pct(rec.p_death)}</div>`;
+  }
+  if (g) h += `<div style="margin-top:8px">Your last move: <b>${esc((g.played || {}).label)}</b> · ${esc(g.label)}</div>`;
+  h += `<div style="margin-top:10px"><a href="${esc(c.panel_url)}" target="_blank" rel="noopener">Open the coach panel</a></div>`;
+  $("coach").innerHTML = h;
+}
+
+function renderModel(m) {
+  if (!m) {
+    $("model").innerHTML = `<div class="muted">No model exported yet. Until a generation beats the rules on the test seeds, there is nothing better to export.</div>`;
+    return;
+  }
+  const e = m.eval || {};
+  $("model").innerHTML = `<div class="move">Generation ${esc(m.generation)} model</div>
+    <div class="stat">
+      <span class="muted">Test mean floor</span><span class="v">${f2(e.mean_floor)}</span>
+      <span class="muted">Test boss kills</span><span class="v">${pct(e.boss_kill_rate)}</span>
+      <span class="muted">Self-play boss kills</span><span class="v">${pct(m.selfplay_boss_kill_rate)}</span>
+      <span class="muted">Ascension</span><span class="v">${esc(m.ascension)}${m.ascension_stands_in_for ? " (for " + esc(m.ascension_stands_in_for) + ")" : ""}</span>
+      <span class="muted">Exported</span><span class="v">${esc(m.exported ? new Date(m.exported).toLocaleString() : "–")}</span>
+    </div>`;
+}
+
+function renderLog(t) {
+  const pre = $("log"), atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 8;
+  pre.textContent = (t.log || []).join("\n") || "(no log yet)";
+  if (atBottom) pre.scrollTop = pre.scrollHeight;
+  $("log-where").innerHTML = t.root ? `Job folder: <code>${esc(t.root)}</code>` : "";
+}
+
+function render(d) {
+  lastData = d;
+  const t = d.training || {};
+  renderChips(d); renderNow(t); renderChampion(t); renderTotals(t); renderCharts(t); renderGenerations(t);
+  renderCoach(d.coach || {}); renderModel(d.model); renderLog(t);
+}
+
+async function tick() {
+  try {
+    const r = await fetch("/api/dashboard", {cache: "no-store"});
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    render(await r.json());
+    lastFetch = Date.now();
+    $("banner").style.display = "none";
+  } catch (e) {
+    $("banner").style.display = "block";
+  }
+}
+
+setInterval(() => { if (lastFetch) $("updated").textContent = "updated " + ago(lastFetch); }, 1000);
+setInterval(tick, 3000);
+tick();
+</script>
+</body>
+</html>

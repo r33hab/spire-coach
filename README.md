@@ -64,6 +64,23 @@ Close the game before steps 2 and 3. Those commands refuse to run while it is op
 6. **`spire-coach coach`** starts the coach: the engine service, the panel's server and
    the floating panel window. Then play as usual.
 
+## Dashboard
+
+    spire-coach dashboard [--port P] [--training-root PATH] [--no-open]
+
+A local page, http://127.0.0.1:15531/, that shows everything at a glance:
+
+- whether the game (and which profile) and the coach are running;
+- the training loop's generation and phase, with a progress bar and the time self-play ends;
+- the champion's test results;
+- the learning curves: mean floor and Act 1 boss kills per generation, against the rules
+  baseline;
+- every generation's results, the exported model, and the tail of the loop's log.
+
+It refreshes every 3 seconds. It only reads: it never changes the training job, the game or
+the coach. It finds the training job in `$SPIRE_COACH_TRAINING_ROOT`, else in the training
+worktree's `runs/stage2`, else in the sts2 checkout's.
+
 ## Save profiles
 
 While the mod is enabled, the game uses a separate set of modded profiles and leaves

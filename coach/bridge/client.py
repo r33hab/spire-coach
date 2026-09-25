@@ -74,6 +74,10 @@ class ModClient:
     def hello(self) -> dict:
         return self._request("GET", "/")
 
+    def profiles(self) -> dict:
+        """The save profiles and which one is current (read-only)."""
+        return self._request("GET", "/api/v1/profiles")
+
     def get_state(self) -> dict:
         # No `hidden` parameter here on purpose: there is no way to request
         # hidden-information fields through this client.
