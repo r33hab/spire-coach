@@ -188,17 +188,17 @@ JSON consumed by the native export `Sts2_LoadCombatSnapshot` and emitted by `Sts
 
 ### 2.3 Draw-pile selections
 
-Amended 2026-09-25 (ledger ruling, converter Task 4). A draw-pile kind (`DrawPileToHand`, `TransformDrawPileToSoul`, `ExhaustFromDrawPile`, `TransformDrawToMinionDiveBomb`) chooses from `piles.draw` as loaded: `known_top`, then the unordered middle, then `known_bottom`. The loader shuffles the middle (2.2), so an index into it names no particular card. Such a selection therefore gives:
+Amended 2026-09-25 (ledger rulings, converter Task 4 and its review). A draw-pile kind (`DrawPileToHand`, `TransformDrawPileToSoul`, `ExhaustFromDrawPile`, `TransformDrawToMinionDiveBomb`) chooses from `piles.draw` as loaded: `known_top`, then the unordered middle, then `known_bottom`. The loader shuffles the middle (2.2), so an index into it names no particular card. Such a selection therefore gives:
 
-- `candidates`: indices of its candidates in `known_top` and `known_bottom` only. An index into the unordered middle is an error.
+- `candidates`: indices of its candidates in `known_top` and `known_bottom` only, in ascending order, each once. An index into the unordered middle, or one no greater than the index before it, is an error.
 - `candidate_cards`: its candidates in `piles.draw.unordered`, by card (optional, default `[]`). Every entry must be a card the selection offers. Any other kind leaves it empty; a non-empty one is an error.
 
-The loader resolves `candidate_cards` AFTER its shuffle, and only within the unordered middle:
+The loader matches `candidate_cards` against the document's own `piles.draw.unordered` list, in the document's order, before the shuffle:
 
-1. Each card takes the first free middle card that equals it in every field.
-2. A card that no free middle card equals then takes a free middle card with its `def_id` and `upgraded`, provided every such card is the same card.
-3. A card that neither step places is an error: no free middle card matches it, or it matches several different cards by `def_id` and `upgraded` alone.
+1. Each card takes the first free card of the list that equals it in every field.
+2. A card that no free card equals then takes the first free card with its `def_id` and `upgraded`, provided every such card is the same card.
+3. A card that neither step places is an error: no free card of the list matches it, or it matches several different cards by `def_id` and `upgraded` alone.
 
-The resolved indices join `candidates`, and the loaded selection keeps its candidates in pile order. The candidate cards only locate the candidates: nothing in any pile moves for them.
+The shuffle then moves the whole list, the matched cards with the rest, and each matched card's new index becomes a candidate. The copy a card names is fixed before the shuffle, so it is as likely to land anywhere in the middle as any other card, and as likely to be any one of its identical copies. Matched after the shuffle, it would always be the topmost copy, and every draw after the pick would lean away from its kind. The resolved indices join `candidates`, and the loaded selection keeps its candidates in pile order. The candidate cards only locate the candidates: nothing in any pile moves for them, and the pile gets the shuffle it would get without them.
 
-`GetStateJson` writes a draw-pile selection the same way: its middle candidates as `candidate_cards`, sorted like `unordered`, and the rest as `candidates`. The same candidate cards are then offered whatever the load seed. A resampling clone (`Sts2_Clone` with resampling) still reshuffles the middle under an open selection's indices, as before.
+`GetStateJson` writes a draw-pile selection the same way: its middle candidates as `candidate_cards`, sorted like `unordered`, and the rest as `candidates`, in pile order. The same candidate cards are then offered whatever the load seed. A resampling clone (`Sts2_Clone` with resampling) still reshuffles the middle under an open selection's indices, as before.
