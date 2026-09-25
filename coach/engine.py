@@ -27,6 +27,7 @@ import select
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -174,19 +175,28 @@ def _strategy_result_from_dict(data: dict) -> StrategyResult:
     return StrategyResult(options=list(data["options"]), model=dict(data["model"]))
 
 
+_STS2_DIR = Path.home() / "Documents/git/sts2"
+
+
 def _default_cmd(workers: int) -> list[str]:
-    sts2_dir = Path.home() / "Documents/git/sts2"
     return [
         "uv",
         "run",
         "--project",
-        str(sts2_dir),
+        str(_STS2_DIR),
         "python",
         "-m",
         "sts2_gym.live.service",
         "--workers",
         str(workers),
     ]
+
+
+def _default_env() -> dict[str, str]:
+    """The coach's own environment, with the simulator's sources on PYTHONPATH: its
+    package is not installed in its env, so the service only imports this way."""
+    pythonpath = os.pathsep.join([str(_STS2_DIR / "src"), str(_STS2_DIR / "rl")])
+    return {**os.environ, "PYTHONPATH": pythonpath}
 
 
 def _drain_stderr(pipe, logger: logging.Logger) -> None:
@@ -207,7 +217,14 @@ def _drain_stderr(pipe, logger: logging.Logger) -> None:
 
 
 class EngineClient:
-    """Talks to the out-of-process engine service over JSON lines."""
+    """Talks to the out-of-process engine service over JSON lines.
+
+    `on_restart`, if set (here or later, as a plain attribute), is called whenever the
+    client restarts a service that was running: before it retries a request that
+    failed, and when it finds the service died between requests. It runs on the
+    calling thread with the client's lock held, so it must only take note (the live
+    coach queues a message for its own thread) and never call back into the client.
+    """
 
     def __init__(
         self,
@@ -215,8 +232,17 @@ class EngineClient:
         *,
         workers: int = 4,
         request_timeout_s: float = 10.0,
+        on_restart: Callable[[], None] | None = None,
     ) -> None:
-        self._cmd = cmd if cmd is not None else _default_cmd(workers)
+        if cmd is None:
+            self._cmd = _default_cmd(workers)
+            self._cwd: Path | None = _STS2_DIR
+            self._env: dict[str, str] | None = _default_env()
+        else:
+            self._cmd = cmd
+            self._cwd = None
+            self._env = None
+        self.on_restart = on_restart
         self._request_timeout_s = request_timeout_s
         self._lock = threading.Lock()
         self._proc: subprocess.Popen | None = None
@@ -288,6 +314,7 @@ class EngineClient:
                 return self._request_once(method, params, timeout_s)
             except EngineUnavailable as exc:
                 self._logger.warning("restarting the engine service after: %s", exc)
+                self._notify_restart()
                 self._restart()
                 try:
                     return self._request_once(method, params, timeout_s)
@@ -372,9 +399,20 @@ class EngineClient:
         if self._proc is not None and self._proc.poll() is not None:
             # It died between requests: reap it, close its pipes and join its
             # stderr drain thread before a fresh one replaces it.
+            self._logger.warning("the engine service died between requests; restarting it")
+            self._notify_restart()
             self._discard_proc()
         if self._proc is None:
             self._spawn()
+
+    def _notify_restart(self) -> None:
+        callback = self.on_restart
+        if callback is None:
+            return
+        try:
+            callback()
+        except Exception:  # a broken callback must not cost the request its retry
+            self._logger.exception("the on_restart callback failed")
 
     def _spawn(self) -> None:
         self._ensure_log_handler()
@@ -384,6 +422,8 @@ class EngineClient:
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                cwd=self._cwd,
+                env=self._env,
             )
         except OSError as exc:
             raise EngineUnavailable(f"could not start the engine service: {exc}") from exc

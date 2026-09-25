@@ -75,6 +75,45 @@ def test_default_cmd_workers_defaults_to_four():
     assert client._cmd[-1] == "4"
 
 
+def test_the_default_launch_runs_in_the_sts2_repo_with_its_sources_on_pythonpath(monkeypatch):
+    # The simulator's package is not installed in its own env, so the service only
+    # imports when launched from the repo with src/ and rl/ on PYTHONPATH.
+    monkeypatch.setenv("SPIRE_COACH_TEST_VAR", "kept")
+    monkeypatch.setenv("PYTHONPATH", "/somewhere/else")
+    sts2_dir = Path.home() / "Documents/git/sts2"
+
+    client = EngineClient()
+
+    assert client._cwd == sts2_dir
+    assert client._env["PYTHONPATH"] == f"{sts2_dir}/src{os.pathsep}{sts2_dir}/rl"
+    assert client._env["SPIRE_COACH_TEST_VAR"] == "kept"  # the rest of the env is kept
+    assert client._env["PATH"] == os.environ["PATH"]
+
+
+def test_a_custom_command_inherits_the_coachs_cwd_and_env():
+    client = EngineClient(cmd=["python", "-c", "pass"])
+    assert client._cwd is None
+    assert client._env is None
+
+
+def test_the_service_is_spawned_with_the_launch_cwd_and_env(monkeypatch):
+    spawned = {}
+
+    def recording_popen(cmd, **kwargs):
+        spawned.update(kwargs, cmd=cmd)
+        raise OSError("recorded, not started")
+
+    monkeypatch.setattr("coach.engine.subprocess.Popen", recording_popen)
+    client = EngineClient()
+
+    with pytest.raises(EngineUnavailable, match="recorded, not started"):
+        client.start()
+
+    assert spawned["cmd"] == client._cmd
+    assert spawned["cwd"] == client._cwd
+    assert spawned["env"] == client._env
+
+
 # --- dataclasses are frozen and mirror the protocol shapes -------------------
 
 
@@ -311,6 +350,51 @@ def test_a_process_that_died_between_requests_is_discarded_before_the_respawn(tm
         assert dead.stdout.closed
         assert dead.stderr.closed
         assert not dead_drain.is_alive()
+    finally:
+        client.close()
+
+
+def test_on_restart_is_called_when_the_client_restarts_the_service_mid_request(tmp_path):
+    restarts = []
+    client = make_client(tmp_path, control={"crash_once": True})
+    client.on_restart = lambda: restarts.append(client._proc.pid if client._proc else None)
+    try:
+        client.start()
+        crashed_pid = client._proc.pid
+
+        client.health()
+
+        # Called once, as the restart begins: the crashed process was still attached.
+        assert restarts == [crashed_pid]
+    finally:
+        client.close()
+
+
+def test_on_restart_is_called_when_a_dead_service_is_replaced_between_requests(tmp_path):
+    restarts = []
+    client = make_client(tmp_path, on_restart=lambda: restarts.append("restart"))
+    try:
+        client.health()  # the first start is not a restart
+        assert restarts == []
+        client._proc.kill()
+        client._proc.wait()
+
+        client.health()
+
+        assert restarts == ["restart"]
+    finally:
+        client.close()
+
+
+def test_a_failing_on_restart_callback_does_not_break_the_request(tmp_path, monkeypatch):
+    monkeypatch.setattr("coach.engine.DEFAULT_DATA_DIR", tmp_path)  # its traceback is logged
+
+    def broken():
+        raise RuntimeError("callback bug")
+
+    client = make_client(tmp_path, control={"crash_once": True}, on_restart=broken)
+    try:
+        assert client.health()["service_version"] == "test-1"
     finally:
         client.close()
 
