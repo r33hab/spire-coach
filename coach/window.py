@@ -8,12 +8,15 @@ printed for the browser.
 Quitting closes the window too. On macOS pywebview turns Ctrl-C in the terminal into a
 Quit, and a Quit ends the app with exit(), so nothing after `webview.start()` would run:
 not the coach's shutdown either. Every quit is therefore cancelled and the window closed
-in its place, which makes `open_window` return.
+in its place, which makes `open_window` return. A macOS logout or restart asks the app
+to quit too, so the first attempt is cancelled once; the coach then closes and stops,
+and a second attempt goes through. SIGTERM and SIGHUP close the window the same way.
 """
 
 from __future__ import annotations
 
 import logging
+import signal
 
 from coach.view import one_line
 
@@ -49,9 +52,23 @@ def open_window(url: str, *, width: int = 380, height: int = 560, on_top: bool =
             return False  # cancels the quit, or the close, under way
 
         window.events.closing += close_instead
+        _close_on_stop_signals(window)
         webview.start()
     except Exception as exc:  # any failure to show the window falls back to the browser
         log.warning("The floating window could not open (%s).", one_line(exc))
         print(f"Open the coach panel in your browser: {url}", flush=True)
         return False
     return True
+
+
+def _close_on_stop_signals(window) -> None:
+    """Make SIGTERM and SIGHUP close the window, as Ctrl-C does. While pywebview's Cocoa
+    loop runs, Python's own signal handlers do not: signals reach it through PyObjC's
+    Mach port, which is how pywebview handles Ctrl-C. Without PyObjC (not macOS), nothing
+    changes."""
+    try:
+        from PyObjCTools import MachSignals
+    except ImportError:
+        return
+    for signum in (signal.SIGTERM, signal.SIGHUP):
+        MachSignals.signal(signum, lambda _signum: window.destroy())

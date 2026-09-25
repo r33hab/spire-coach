@@ -451,3 +451,4 @@ def test_the_server_listens_on_this_mac_only(coach):
     assert (server.config.host, server.config.port) == ("127.0.0.1", 15531)
     assert create_server(app).config.port == 15530  # the default port
     assert "host" not in inspect.signature(create_server).parameters
+    assert server.config.log_level == "critical"  # the coach reports its own problems

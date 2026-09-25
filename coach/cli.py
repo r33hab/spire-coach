@@ -63,6 +63,8 @@ _SERVER_STOP_S = 5.0
 # How long one poll of the session can take before it sees it should stop: the mod's
 # 2 s timeout plus the 1 s wait between polls while the game is away, with room to spare.
 _POLL_S = 5.0
+# What stops the coach: Ctrl-C, a plain `kill`, the terminal closing.
+_STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 
 
 # --- doctor --------------------------------------------------------------------
@@ -322,9 +324,16 @@ class CoachError(Exception):
 
 
 def _wait_for_ctrl_c() -> None:
-    """Block until Ctrl-C, which raises KeyboardInterrupt here."""
+    """Block until Ctrl-C (or SIGTERM or SIGHUP), which raises KeyboardInterrupt here."""
     while True:
         time.sleep(1.0)
+
+
+def _say(text: str, *, error: bool = False) -> None:
+    """One line for the user. A terminal that has gone away (a broken pipe) is no reason
+    to stop the coach, least of all while it is stopping."""
+    with contextlib.suppress(OSError):
+        print(text, file=sys.stderr if error else sys.stdout, flush=True)
 
 
 def cmd_coach(
@@ -336,17 +345,19 @@ def cmd_coach(
     window: bool = True,
     mode: str = "show",
     engine_cmd: list[str] | None = None,
-    client_factory: Callable[[str, str | None], ModClient] = ModClient,
-    show_window: Callable[[str], bool] = open_window,
-    wait_for_ctrl_c: Callable[[], None] = _wait_for_ctrl_c,
+    client_factory: Callable[[str, str | None], ModClient] | None = None,
+    show_window: Callable[[str], bool] | None = None,
+    wait_for_ctrl_c: Callable[[], None] | None = None,
 ) -> int:
     """Coach live until Ctrl-C, or until the panel's window is closed.
 
     The engine service starts first and is health-checked. Then the panel's server and
     the coach session each get a thread of their own, and the window takes the main
     thread, as pywebview needs on macOS. When the window cannot open, the panel is one
-    browser tab away and the coach runs until Ctrl-C. `engine_cmd` replaces the engine
-    service's launch command (tests run a fake service).
+    browser tab away and the coach runs until Ctrl-C. SIGTERM (a plain `kill`) and SIGHUP
+    (the terminal closing) stop it as Ctrl-C does. `engine_cmd` replaces the engine
+    service's launch command; the last three keywords replace the mod client, the window
+    and the wait for Ctrl-C (tests use stand-ins).
     """
     settings = CoachSettings(
         mode=mode,
@@ -354,25 +365,26 @@ def cmd_coach(
         poll_interval_s=config.poll_interval_s,
         engine_start_timeout_s=config.engine_start_timeout_s,
     )
-    coach = _LiveCoach(
-        client_factory(config.base_url, config.token),
-        EngineClient(engine_cmd, workers=workers),
-        settings,
-    )
-    try:
-        coach.start(config.data_dir, port)
-        url = f"http://{HOST}:{port}/"
-        print(f"The coach panel is at {url}", flush=True)
-        if window:
-            print("Close the panel's window or press Ctrl-C to stop the coach.", flush=True)
-            if show_window(url):
-                return 0
-        print("Press Ctrl-C to stop the coach.", flush=True)
-        wait_for_ctrl_c()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        coach.stop()
+    with _stop_signals_raise_keyboard_interrupt():
+        coach = _LiveCoach(
+            (client_factory or ModClient)(config.base_url, config.token),
+            EngineClient(engine_cmd, workers=workers),
+            settings,
+        )
+        try:
+            coach.start(config.data_dir, port)
+            url = f"http://{HOST}:{port}/"
+            _say(f"The coach panel is at {url}")
+            if window:
+                _say("Close the panel's window or press Ctrl-C to stop the coach.")
+                if (show_window or open_window)(url):
+                    return 0
+            _say("Press Ctrl-C to stop the coach.")
+            (wait_for_ctrl_c or _wait_for_ctrl_c)()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            coach.stop()
     return 0
 
 
@@ -390,18 +402,17 @@ class _LiveCoach:
         self._server_thread: threading.Thread | None = None
 
     def start(self, data_dir: Path, port: int) -> None:
-        print("Starting the engine service…", flush=True)
+        _say("Starting the engine service…")
         # A cold start of the service can take a while: this first check may wait for
         # it. The session checks a failing engine again by itself.
         problems = engine_health_problems(
             self._engine, timeout_s=self._settings.engine_start_timeout_s
         )
         for problem in problems:
-            print(
+            _say(
                 f"{sentence(f'Advice is off: {problem}')} Turn on the version override in "
                 "the panel to see advice anyway.",
-                file=sys.stderr,
-                flush=True,
+                error=True,
             )
         broadcaster = Broadcaster()
         feed = _PanelFeed(_starting_state(self._settings), broadcaster)
@@ -423,31 +434,42 @@ class _LiveCoach:
 
     def stop(self) -> None:
         """Stop whatever was started: the session first, so that no engine call is cut
-        off, then the engine service, then the panel's server. Ctrl-C is ignored
-        meanwhile: a second one would cut this short and could leave the engine service
-        running, while every wait here is bounded."""
-        with _ctrl_c_ignored():
-            if self._session_thread is not None:
-                print("Stopping the coach…", flush=True)
-            self._stopping.set()
-            if self._session_thread is not None:
-                self._session_thread.join(_session_stop_s(self._settings.time_budget_s))
-                if self._session_thread.is_alive():
-                    print(
-                        "The coach session did not stop in time; closing the engine anyway.",
-                        file=sys.stderr,
-                        flush=True,
-                    )
-            elif self._session is not None:
+        off early, then the engine service, the panel's server and the mod client. Each
+        step runs even when one before it failed. Ctrl-C, SIGTERM and SIGHUP are ignored
+        meanwhile: every wait here is bounded, and one of them would cut stopping short
+        and could leave the engine service running."""
+        with _stop_signals_ignored(), contextlib.ExitStack() as then:
+            then.callback(self._client.close)
+            then.callback(self._stop_server)
+            then.callback(self._engine.close)
+            self._stop_session()
+
+    def _stop_session(self) -> None:
+        self._stopping.set()
+        if self._session_thread is None:
+            if self._session is not None:
                 self._session.close()  # its engine thread runs from the start
-            self._engine.close()
-            if self._server_thread is not None:
-                self._server.should_exit = True
-                self._server_thread.join(_SERVER_STOP_S)
-                if self._server_thread.is_alive():
-                    self._server.force_exit = True  # a panel that will not let go
-                    self._server_thread.join(_SERVER_STOP_S)
-            self._client.close()
+            return
+        _say("Stopping the coach…")
+        # One poll to see the stop, then the session's own close waits for its engine
+        # thread.
+        bound = _POLL_S + self._session.close_timeout_s
+        self._session_thread.join(bound)
+        if self._session_thread.is_alive():
+            _say(
+                f"The coach session did not stop within {bound:.0f} s; closing the engine "
+                "service now, which cuts off any request it is still waiting on.",
+                error=True,
+            )
+
+    def _stop_server(self) -> None:
+        if self._server_thread is None:
+            return
+        self._server.should_exit = True
+        self._server_thread.join(_SERVER_STOP_S)
+        if self._server_thread.is_alive():
+            self._server.force_exit = True  # a panel that will not let go
+            self._server_thread.join(_SERVER_STOP_S)
 
     def _apply_settings(self, update: dict) -> None:
         """A settings update from the panel, already validated: the mode changes at once,
@@ -522,24 +544,40 @@ def _wait_until_listening(server: uvicorn.Server, thread: threading.Thread, port
         time.sleep(0.01)
 
 
-def _session_stop_s(budget_s: float) -> float:
-    """How long the session may take to stop: one poll, then its own close, which waits
-    out an analysis the engine client retries once (2 x (2 x budget + 5) s, ruling R1)."""
-    return _POLL_S + 2 * (2 * budget_s + 5.0)
+def _interrupt(signum: int, frame: object) -> None:
+    raise KeyboardInterrupt
 
 
 @contextlib.contextmanager
-def _ctrl_c_ignored() -> Iterator[None]:
-    """Ignore Ctrl-C for a while. Only the main thread may change signal handling."""
+def _stop_signals_raise_keyboard_interrupt() -> Iterator[None]:
+    """SIGTERM (a plain `kill`) and SIGHUP (the terminal closing) raise KeyboardInterrupt
+    on the main thread, as Ctrl-C does, so the coach stops in order. (With the window
+    open, coach/window.py makes them close the window instead.)"""
+    with _signal_handlers({signal.SIGTERM: _interrupt, signal.SIGHUP: _interrupt}):
+        yield
+
+
+@contextlib.contextmanager
+def _stop_signals_ignored() -> Iterator[None]:
+    with _signal_handlers(dict.fromkeys(_STOP_SIGNALS, signal.SIG_IGN)):
+        yield
+
+
+@contextlib.contextmanager
+def _signal_handlers(handlers: dict) -> Iterator[None]:
+    """Set these signal handlers for a while. Only the main thread may change signal
+    handling; on any other thread this does nothing."""
     if threading.current_thread() is not threading.main_thread():
         yield
         return
-    previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    previous = {signum: signal.signal(signum, handler) for signum, handler in handlers.items()}
     try:
         yield
     finally:
-        # None: the handler was not set from Python. Python's own is the best guess.
-        signal.signal(signal.SIGINT, signal.default_int_handler if previous is None else previous)
+        for signum, handler in previous.items():
+            if handler is None:  # not set from Python: its own default is the best guess
+                handler = signal.default_int_handler if signum == signal.SIGINT else signal.SIG_DFL
+            signal.signal(signum, handler)
 
 
 # --- argument parsing ------------------------------------------------------------------
@@ -631,7 +669,7 @@ def _build_parser() -> argparse.ArgumentParser:
     coach_parser.add_argument(
         "--no-window",
         action="store_true",
-        help="no floating window: open the panel in a browser tab instead",
+        help="no floating window: the terminal prints the panel's URL; open it in a browser tab",
     )
     coach_parser.add_argument(
         "--mode",

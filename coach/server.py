@@ -199,8 +199,10 @@ def create_server(app: FastAPI, *, port: int = DEFAULT_PORT) -> uvicorn.Server:
     """A uvicorn server for `app` that listens on 127.0.0.1 only, never the network.
 
     Run it with `server.run()` (in a thread); stop it with `server.should_exit = True`.
+    uvicorn's own logging is quiet (critical only): the coach says what went wrong
+    itself, in one line (a port already taken, say).
     """
-    return uvicorn.Server(uvicorn.Config(app, host=HOST, port=port, log_level="warning"))
+    return uvicorn.Server(uvicorn.Config(app, host=HOST, port=port, log_level="critical"))
 
 
 # --- helpers -------------------------------------------------------------------------

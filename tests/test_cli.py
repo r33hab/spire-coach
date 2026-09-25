@@ -2,14 +2,17 @@ import contextlib
 import copy
 import errno
 import functools
+import io
 import json
 import shutil
+import signal
 import socket
 import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
+from unittest import mock
 
 import httpx
 import pytest
@@ -947,6 +950,7 @@ class CoachRun:
         self.control = self.engine_cmd[-1]  # in the command line of every service it runs
         self.set_engine_control(**(engine_control or {}))
         self.steps: list[str] = []  # what the stand-ins for the window and Ctrl-C saw happen
+        self.stops: list[str] = []  # the session, the engine and the server, as they stopped
         self._threads_before = set(threading.enumerate())
 
     def set_engine_control(self, **control):
@@ -954,9 +958,68 @@ class CoachRun:
         control = {"log_requests_to": str(self.requests), **control}
         Path(self.control).write_text(json.dumps(control), encoding="utf-8")
 
-    def __call__(self, **options):
+    def __call__(self, *, retry_port_race=True, **options):
+        try:
+            return self._run(**options)
+        except cli.CoachError:
+            if not retry_port_race:
+                raise
+            # The free port found for this run was taken meanwhile (by another test run,
+            # say): once more, on a new one.
+            self.port = free_port()
+            self.url = f"http://127.0.0.1:{self.port}/"
+            self.mod = FakeMod()
+            self.stops.clear()
+            self.requests.unlink(missing_ok=True)
+            return self._run(**options)
+
+    def _run(self, **options):
         options = {"engine_cmd": self.engine_cmd, "port": self.port, **options}
-        return cli.cmd_coach(self.config, client_factory=lambda url, token: self.mod, **options)
+        with self.recording_the_stops():
+            return cli.cmd_coach(self.config, client_factory=lambda url, token: self.mod, **options)
+
+    @contextlib.contextmanager
+    def recording_the_stops(self):
+        """Thin wrappers note when the session, the engine and the server stop."""
+        stops = self.stops
+        make_engine, make_server = cli.EngineClient, cli.create_server
+
+        class Session(cli.CoachSession):
+            def close(self):
+                ended = super().close()
+                stops.append("session closed")
+                return ended
+
+        def engine(cmd, *, workers):
+            client = make_engine(cmd, workers=workers)
+            close = client.close
+
+            def closed():
+                close()
+                stops.append("engine closed")
+
+            client.close = closed
+            return client
+
+        def server(app, *, port):
+            made = make_server(app, port=port)
+            run = made.run
+
+            def ran(*args, **kwargs):
+                try:
+                    return run(*args, **kwargs)
+                finally:
+                    stops.append("server stopped")
+
+            made.run = ran
+            return made
+
+        with (
+            mock.patch.object(cli, "CoachSession", Session),
+            mock.patch.object(cli, "EngineClient", engine),
+            mock.patch.object(cli, "create_server", server),
+        ):
+            yield
 
     def state(self) -> dict:
         return httpx.get(self.url + "state", timeout=5.0).json()
@@ -981,12 +1044,13 @@ class CoachRun:
             thread.name for thread in threading.enumerate() if thread not in self._threads_before
         )
 
-    def assert_all_stopped(self):
+    def assert_all_stopped(self, order=("session closed", "engine closed", "server stopped")):
         assert self.engine_services() == [], "an engine service is still running"
         assert self.new_threads() == [], "a thread the coach started is still running"
         with pytest.raises(httpx.ConnectError):
             self.state()  # the panel's server no longer listens
         assert self.mod.closed
+        assert self.stops == list(order)
 
 
 @pytest.fixture(autouse=True)
@@ -1109,10 +1173,15 @@ def test_an_unhealthy_engine_keeps_advice_off_until_the_panel_overrides_it(tmp_p
     ]
 
 
-def test_a_port_already_taken_stops_the_coach_at_once_and_leaves_nothing_running(
-    tmp_path, monkeypatch
+def test_a_port_already_taken_is_one_line_on_stderr_and_leaves_nothing_running(
+    tmp_path, monkeypatch, capsys
 ):
     run = CoachRun(tmp_path)
+    monkeypatch.setattr(cli, "load_config", lambda: run.config)
+    monkeypatch.setattr(cli, "ModClient", lambda base_url, token: run.mod)
+    monkeypatch.setattr(
+        cli, "EngineClient", lambda cmd, *, workers: EngineClient(run.engine_cmd, workers=workers)
+    )
     # Noticed when the server gives up, not when the deadline for it to listen runs out.
     monkeypatch.setattr(cli, "_SERVER_START_S", UNDER_LOAD_S)
 
@@ -1120,16 +1189,18 @@ def test_a_port_already_taken_stops_the_coach_at_once_and_leaves_nothing_running
         taken.bind(("127.0.0.1", run.port))
         taken.listen()
         started = time.monotonic()
-        with pytest.raises(cli.CoachError) as refused:
-            run(window=False, wait_for_ctrl_c=never_ctrl_c)
+        with run.recording_the_stops():
+            result = cli.main(["coach", "--port", str(run.port), "--no-window"])
         took = time.monotonic() - started
 
-    assert str(refused.value) == (
+    assert result == 1
+    assert capsys.readouterr().err.splitlines() == [  # uvicorn's own error log stays quiet
         f"The coach panel could not listen on 127.0.0.1:{run.port}: is another coach "
         "running? Choose another port with --port."
-    )
+    ]
     assert took < UNDER_LOAD_S / 2
-    run.assert_all_stopped()
+    # The server gave up at startup; the session's thread never started.
+    run.assert_all_stopped(order=("server stopped", "session closed", "engine closed"))
 
 
 def test_the_first_health_check_waits_for_a_slow_engine_start(tmp_path, monkeypatch):
@@ -1184,4 +1255,81 @@ def test_a_failing_engine_is_checked_again_and_advice_comes_on_without_a_restart
     assert run(window=False, wait_for_ctrl_c=wait_for_ctrl_c) == 0
 
     assert run.steps == ["waited for Ctrl-C"]
+    run.assert_all_stopped()
+
+
+class TerminalGoneWhileStopping(io.StringIO):
+    """A terminal that goes away just as the coach says it is stopping."""
+
+    def write(self, text):
+        if "Stopping" in text:
+            raise BrokenPipeError(32, "Broken pipe")
+        return super().write(text)
+
+
+def test_a_terminal_gone_away_does_not_keep_the_coach_from_stopping_all(tmp_path, monkeypatch):
+    run = CoachRun(tmp_path)
+    monkeypatch.setattr(sys, "stdout", TerminalGoneWhileStopping())
+
+    def wait_for_ctrl_c():
+        run.steps.append("waited for Ctrl-C")
+        assert run.shows("advice")
+        raise KeyboardInterrupt
+
+    assert run(window=False, wait_for_ctrl_c=wait_for_ctrl_c) == 0
+
+    assert run.steps == ["waited for Ctrl-C"]
+    run.assert_all_stopped()
+
+
+def test_a_step_of_stopping_that_fails_does_not_skip_the_steps_after_it(tmp_path, monkeypatch):
+    run = CoachRun(tmp_path)
+
+    def engine_client(cmd, *, workers):
+        engine = EngineClient(cmd, workers=workers)
+        close = engine.close
+
+        def failing_close():
+            close()
+            raise OSError("the engine log could not be closed")
+
+        engine.close = failing_close
+        return engine
+
+    monkeypatch.setattr(cli, "EngineClient", engine_client)
+
+    def wait_for_ctrl_c():
+        run.steps.append("waited for Ctrl-C")
+        assert run.shows("advice")
+        raise KeyboardInterrupt
+
+    with pytest.raises(OSError, match="engine log could not be closed"):
+        run(window=False, wait_for_ctrl_c=wait_for_ctrl_c)
+
+    assert run.steps == ["waited for Ctrl-C"]
+    run.assert_all_stopped(order=("session closed", "server stopped"))  # the rest still ran
+
+
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGHUP])
+def test_sigterm_and_sighup_stop_the_coach_in_order_as_ctrl_c_does(tmp_path, signum):
+    # A plain `kill`, or the terminal closing, must not end the coach halfway.
+    run = CoachRun(tmp_path)
+
+    def not_for_the_test(signum, frame):
+        raise AssertionError(f"signal {signum} reached the test instead of the coach")
+
+    previous = signal.signal(signum, not_for_the_test)  # else it would end pytest itself
+    try:
+
+        def wait_for_ctrl_c():
+            run.steps.append("waited")
+            assert run.shows("advice")
+            signal.raise_signal(signum)
+            pytest.fail("the signal did not stop the coach")
+
+        assert run(window=False, wait_for_ctrl_c=wait_for_ctrl_c) == 0
+    finally:
+        signal.signal(signum, previous)
+
+    assert run.steps == ["waited"]
     run.assert_all_stopped()

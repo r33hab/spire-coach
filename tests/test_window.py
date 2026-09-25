@@ -7,13 +7,38 @@ from __future__ import annotations
 
 import logging
 import re
+import signal
 import sys
 import types
+
+import pytest
 
 from coach.server import PANEL_DIR
 from coach.window import open_window
 
 URL = "http://127.0.0.1:15530/"
+
+
+class FakeMachSignals(types.ModuleType):
+    """PyObjC's MachSignals: signal handlers that run in the Cocoa loop."""
+
+    def __init__(self) -> None:
+        super().__init__("PyObjCTools.MachSignals")
+        self.handlers: dict = {}
+
+    def signal(self, signum, handler):
+        self.handlers[signum] = handler
+
+
+@pytest.fixture(autouse=True)
+def mach_signals(monkeypatch):
+    # Never the real one: it would take over this test process's own signal handling.
+    fake = FakeMachSignals()
+    package = types.ModuleType("PyObjCTools")
+    package.MachSignals = fake
+    monkeypatch.setitem(sys.modules, "PyObjCTools", package)
+    monkeypatch.setitem(sys.modules, "PyObjCTools.MachSignals", fake)
+    return fake
 
 
 class FakeEvent:
@@ -112,6 +137,20 @@ def test_a_quit_closes_the_window_instead_so_the_coach_stops_in_order(monkeypatc
     assert window.destroyed == 0
     assert on_closing() is False  # the quit or close under way is cancelled...
     assert window.destroyed == 1  # ...and the window closed instead
+
+
+def test_sigterm_and_sighup_close_the_window_as_ctrl_c_does(monkeypatch, mach_signals):
+    # In pywebview's Cocoa loop, Python's own signal handlers do not run: the signals
+    # come in through PyObjC's Mach port, as pywebview does it for Ctrl-C.
+    webview = FakeWebview()
+    monkeypatch.setitem(sys.modules, "webview", webview)
+
+    open_window(URL)
+
+    [window] = webview.created
+    assert sorted(mach_signals.handlers) == sorted([signal.SIGTERM, signal.SIGHUP])
+    mach_signals.handlers[signal.SIGHUP](signal.SIGHUP)
+    assert window.destroyed == 1
 
 
 def test_without_pywebview_the_url_is_printed_for_the_browser(monkeypatch, capsys, caplog):
