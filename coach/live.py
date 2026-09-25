@@ -89,7 +89,6 @@ _SEEN_MAX = 64  # settled positions kept for matching moves to where they were m
 _SOURCES_MAX = 256  # recent action-log seqs whose source (human/api) is remembered
 _FIDELITY_WINDOW_MOVES = 10  # spec 6.3: a mismatch keeps its warning up for 10 moves
 _WAITING_POLL_S = 1.0  # retry interval while the game is unreachable, as capture uses
-_WORKER_JOIN_S = 5.0
 
 _UNIDENTIFIED_SELECTION = Move(
     kind="select",
@@ -271,9 +270,23 @@ class CoachSession:
         self._mode = mode
         self._results.put(_REFRESH)
 
-    def close(self) -> None:
-        """Stop the engine thread (the engine and the bridge belong to the caller)."""
-        self._worker.close(_WORKER_JOIN_S)
+    def close(self) -> bool:
+        """Stop the engine thread; True if it ended.
+
+        Queued engine calls are dropped, and a running one is waited out for as long as
+        it can take: an analysis (2 x budget + 5 s, ruling R1) that the client retries
+        once after restarting the service. The engine and the bridge belong to the
+        caller, who closes the engine after this: closing it first would cut off the
+        request the thread may still be running.
+        """
+        timeout = 2 * (2 * self._settings.time_budget_s + 5.0)
+        ended = self._worker.close(timeout)
+        if not ended:
+            with contextlib.suppress(Exception):
+                self._runlog.append(
+                    "error", {"error": f"the engine thread did not stop within {timeout:.0f}s"}
+                )
+        return ended
 
     # --- polling ---------------------------------------------------------------------
 

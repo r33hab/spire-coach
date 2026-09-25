@@ -1385,6 +1385,32 @@ def test_run_polls_until_stopped_and_joins_its_engine_thread(make_session):
     assert not session._worker._thread.is_alive()
 
 
+def test_close_waits_out_an_analysis_and_its_retry_and_reports_whether_it_ended(
+    make_session, tmp_path, monkeypatch
+):
+    # Review minor 3: the engine thread may be in an analysis (2 x budget + 5 s at
+    # most, ruling R1) that the client retries once after a restart.
+    bridge = FakeBridge()
+    session, _ = make_session(
+        bridge, FakeEngine(standard_analysis), CoachSettings(time_budget_s=2.0)
+    )
+    waited = []
+    real_close = session._worker.close
+
+    def spy(timeout):
+        waited.append(timeout)
+        return real_close(timeout)
+
+    monkeypatch.setattr(session._worker, "close", spy)
+    assert session.close() is True
+    assert waited == [2 * (2 * 2.0 + 5.0)]
+
+    monkeypatch.setattr(session._worker, "close", lambda timeout: False)
+    assert session.close() is False
+    [record] = run_log(tmp_path, "error")
+    assert "did not stop" in record["error"]
+
+
 def test_run_survives_an_unexpected_error_and_shows_it_as_one_sentence(make_session):
     class FlakyBridge(FakeBridge):
         def __init__(self, state):
