@@ -36,6 +36,12 @@ needs by its turn is skipped.
 Threading. Worker results are applied on the session's own thread, in `step()` and in
 `run()`'s waits between polls, so only that thread ever touches the session's state;
 `set_mode` just records the mode and asks that thread to refresh the panel.
+
+Engine health. Advice needs a healthy engine service that runs the expected versions
+(`engine_health_problems`). When it is not, advice is off as for a version mismatch,
+and the session checks the engine again on its engine thread, every
+`engine_recheck_s` and whenever the client restarts the service, until it is healthy:
+advice then comes on without a restart of the coach.
 """
 
 from __future__ import annotations
@@ -61,6 +67,7 @@ from coach.bridge.decisions import (
     fingerprint,
 )
 from coach.bridge.versions import VersionStatus, check_versions, read_game_version
+from coach.config import EXPECTED_GAME_VERSION
 from coach.engine import Analysis, CheckResult, EngineClient, EngineError, EngineUnavailable, Move
 from coach.runlog import RunLog
 from coach.snapshot import SnapshotError, build_live_snapshot
@@ -114,6 +121,36 @@ class CoachSettings:
     # What the engine's value counts per potion still held (spec 7.2: 10 HP by
     # default); must match the engine's own setting to read HP loss off its values.
     potion_value_hp: float = 10.0
+    # How long a health check may wait for a service that is starting up (uv, imports,
+    # the search workers), and how often a failing engine is checked again.
+    engine_start_timeout_s: float = 90.0
+    engine_recheck_s: float = 30.0
+
+
+def engine_health_problems(engine: EngineClient, *, timeout_s: float | None = None) -> list[str]:
+    """Start the engine service if need be and check its health: what keeps advice off.
+
+    Advice needs the service healthy, reporting the native API version it runs (spec
+    5.3 checks the simulator's Sts2_NativeApiVersion) and targeting the game version the
+    coach expects. Each problem is one phrase; none means the engine may advise.
+    """
+    try:
+        engine.start()
+        health = engine.health(timeout_s=timeout_s)
+    except EngineError as exc:
+        return [f"the engine service failed its health check ({one_line(exc)})"]
+    health = health if isinstance(health, dict) else {}
+    problems = []
+    if health.get("native_api_version") is None:
+        problems.append("the engine service did not report its native API version")
+    target = health.get("game_version_target")
+    if target is None:
+        problems.append("the engine service did not report the game version it targets")
+    elif target != EXPECTED_GAME_VERSION:
+        problems.append(
+            f"the engine service targets game version {target}, not {EXPECTED_GAME_VERSION}"
+        )
+    return problems
 
 
 # --- what the session keeps ----------------------------------------------------------
@@ -189,9 +226,10 @@ class CoachSession:
     restarting" while the client restarts the service (Review Focus 2).
 
     `engine_problems` are what the engine service's health check found wrong when the
-    coach started, one phrase each. Advice needs a healthy engine as much as the right
-    game and mod, so they count as version problems: advice is off, with the reason,
-    unless the version override is on.
+    coach started, one phrase each (`engine_health_problems`). Advice needs a healthy
+    engine as much as the right game and mod, so they count as version problems: advice
+    is off, with the reason, unless the version override is on. While there are any,
+    the session checks the engine again (see the module docstring).
     """
 
     def __init__(
@@ -226,8 +264,12 @@ class CoachSession:
         self._bridge_problem: str | None = None
         self._internal_error: str | None = None
         self._game_version: str | None = None
+        self._game_versions = VersionStatus(ok=True, problems=[])  # the game's and the mod's
         self._engine_problems = list(engine_problems)
-        self._versions = self._with_engine_problems(VersionStatus(ok=True, problems=[]))
+        self._versions = self._with_engine_problems(self._game_versions)
+        self._engine_checked_at = time.monotonic()  # the caller has just checked it
+        self._engine_check_pending = False  # a health check is queued or running
+        self._engine_check_due = False  # the client restarted the service: check it now
         self._run: dict = {"act": None, "floor": None}
         self._room_type: str | None = None
 
@@ -255,6 +297,7 @@ class CoachSession:
         except BridgeError as exc:
             self._connected = False
             self._bridge_problem = one_line(exc)
+        self._check_engine_again()
         self._retry_blocked()
         self._apply_results()
         self._refresh()
@@ -281,16 +324,21 @@ class CoachSession:
         self._mode = mode
         self._results.put(_REFRESH)
 
+    @property
+    def close_timeout_s(self) -> float:
+        """How long `close()` waits for the engine thread: an analysis (2 x budget + 5 s,
+        ruling R1) that the client retries once after restarting the service."""
+        return 2 * (2 * self._settings.time_budget_s + 5.0)
+
     def close(self) -> bool:
         """Stop the engine thread; True if it ended.
 
-        Queued engine calls are dropped, and a running one is waited out for as long as
-        it can take: an analysis (2 x budget + 5 s, ruling R1) that the client retries
-        once after restarting the service. The engine and the bridge belong to the
-        caller, who closes the engine after this: closing it first would cut off the
-        request the thread may still be running.
+        Queued engine calls are dropped, and a running one is waited out for up to
+        `close_timeout_s`. The engine and the bridge belong to the caller, who closes
+        the engine after this: closing it first would cut off the request the thread may
+        still be running.
         """
-        timeout = 2 * (2 * self._settings.time_budget_s + 5.0)
+        timeout = self.close_timeout_s
         ended = self._worker.close(timeout)
         if not ended:
             with contextlib.suppress(Exception):
@@ -332,7 +380,8 @@ class CoachSession:
     def _on_settled(self, state: dict, seq: int | None) -> None:
         decision = classify(state)
         self._game_version = read_game_version()
-        self._versions = self._with_engine_problems(check_versions(self._game_version, state))
+        self._game_versions = check_versions(self._game_version, state)
+        self._versions = self._with_engine_problems(self._game_versions)
         run = state.get("run") if isinstance(state.get("run"), dict) else {}
         self._run = {"act": run.get("act"), "floor": run.get("floor")}
         key = fingerprint(state)
@@ -455,12 +504,43 @@ class CoachSession:
         if position is not None and position.status == "blocked" and self._advice_allowed():
             self._maybe_analyze(position)
 
-    # --- analysis --------------------------------------------------------------------
+    # --- engine health -------------------------------------------------------------
 
     def _with_engine_problems(self, versions: VersionStatus) -> VersionStatus:
         if not self._engine_problems:
             return versions
         return VersionStatus(ok=False, problems=[*versions.problems, *self._engine_problems])
+
+    def _check_engine_again(self) -> None:
+        """While the engine keeps advice off, check it again on the engine thread: every
+        `engine_recheck_s`, and at once after the client restarted the service."""
+        if not self._engine_problems or self._engine_check_pending:
+            return
+        waited = time.monotonic() - self._engine_checked_at
+        if not self._engine_check_due and waited < self._settings.engine_recheck_s:
+            return
+        self._engine_check_pending = True
+        self._engine_check_due = False
+        engine, timeout = self._engine, self._settings.engine_start_timeout_s
+        self._worker.submit(
+            Job(lambda: engine_health_problems(engine, timeout_s=timeout), context=("health",))
+        )
+
+    def _on_engine_health(self, outcome: object) -> None:
+        self._engine_check_pending = False
+        self._engine_checked_at = time.monotonic()
+        if isinstance(outcome, list):
+            self._engine_problems = outcome
+        else:  # not an engine error: engine_health_problems turns those into problems
+            self._engine_problems = [
+                f"the engine service's health check failed ({type(outcome).__name__}: "
+                f"{one_line(outcome)})"
+            ]
+        self._runlog.append("engine_health", {"problems": self._engine_problems})
+        self._versions = self._with_engine_problems(self._game_versions)
+        self._retry_blocked()  # healthy now: the position on screen is analyzed at once
+
+    # --- analysis --------------------------------------------------------------------
 
     def _advice_allowed(self) -> bool:
         return self._versions.ok or self._settings.override_versions
@@ -758,6 +838,10 @@ class CoachSession:
         the next one."""
         if message is _ENGINE_RESTARTING:
             self._engine_restarting = True
+            # A new service may work where the old one did not. A restart within the
+            # health check itself does not count: that check's own answer is coming.
+            if self._engine_problems and not self._engine_check_pending:
+                self._engine_check_due = True
         elif message is not _REFRESH:
             # The request that restarted the service has come back, one way or another.
             self._engine_restarting = False
@@ -765,6 +849,8 @@ class CoachSession:
             kind, *context = job.context
             if kind == "analysis":
                 self._on_analysis(*context, outcome)
+            elif kind == "health":
+                self._on_engine_health(outcome)
             else:
                 self._on_check(*context, outcome)
         self._refresh()

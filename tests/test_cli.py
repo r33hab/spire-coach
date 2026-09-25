@@ -1,6 +1,7 @@
 import contextlib
 import copy
 import errno
+import functools
 import json
 import shutil
 import socket
@@ -20,6 +21,7 @@ from coach.bridge.versions import VersionStatus
 from coach.capture import CaptureStats
 from coach.config import Config
 from coach.engine import EngineClient
+from coach.live import CoachSettings, engine_health_problems
 from coach.modinstall import InstallError
 from coach.saves import SaveError, backup
 from coach.view import CoachState
@@ -800,19 +802,29 @@ def fake_engine_cmd(tmp_path, control=None):
 def engine_problems(cmd):
     engine = EngineClient(cmd, request_timeout_s=5.0)
     try:
-        return cli._engine_problems(engine)
+        return engine_health_problems(engine)
     finally:
         engine.close()
 
 
-def test_a_healthy_engine_that_reports_its_native_api_version_has_no_problem(tmp_path):
+def test_a_healthy_engine_that_reports_its_versions_has_no_problem(tmp_path):
     assert engine_problems(fake_engine_cmd(tmp_path)) == []
 
 
 def test_an_engine_that_reports_no_native_api_version_is_a_problem(tmp_path):
-    cmd = fake_engine_cmd(tmp_path, {"health": {"service_version": "old", "workers": 4}})
+    health = {"service_version": "old", "game_version_target": "v0.107.1"}
 
-    assert engine_problems(cmd) == ["the engine service did not report its native API version"]
+    problems = engine_problems(fake_engine_cmd(tmp_path, {"health": health}))
+
+    assert problems == ["the engine service did not report its native API version"]
+
+
+def test_an_engine_built_for_another_game_version_is_a_problem(tmp_path):
+    health = {"native_api_version": 1, "game_version_target": "v0.111.0"}
+
+    problems = engine_problems(fake_engine_cmd(tmp_path, {"health": health}))
+
+    assert problems == ["the engine service targets game version v0.111.0, not v0.107.1"]
 
 
 @pytest.mark.parametrize(
@@ -925,18 +937,22 @@ class CoachRun:
     are stand-ins, while the engine service is a real child process running the fake
     service script and the panel's server really listens on 127.0.0.1."""
 
-    def __init__(self, tmp_path, engine_control=None):
+    def __init__(self, tmp_path, engine_control=None, **config):
         self.port = free_port()
         self.url = f"http://127.0.0.1:{self.port}/"
         self.mod = FakeMod()
-        self.config = make_config(tmp_path, poll_interval_s=0.02)
+        self.config = make_config(tmp_path, poll_interval_s=0.02, **config)
         self.requests = tmp_path / "engine-requests.jsonl"
-        self.engine_cmd = fake_engine_cmd(
-            tmp_path, {"log_requests_to": str(self.requests), **(engine_control or {})}
-        )
+        self.engine_cmd = fake_engine_cmd(tmp_path)
         self.control = self.engine_cmd[-1]  # in the command line of every service it runs
+        self.set_engine_control(**(engine_control or {}))
         self.steps: list[str] = []  # what the stand-ins for the window and Ctrl-C saw happen
         self._threads_before = set(threading.enumerate())
+
+    def set_engine_control(self, **control):
+        """What the fake engine service does from its next request on."""
+        control = {"log_requests_to": str(self.requests), **control}
+        Path(self.control).write_text(json.dumps(control), encoding="utf-8")
 
     def __call__(self, **options):
         options = {"engine_cmd": self.engine_cmd, "port": self.port, **options}
@@ -1069,7 +1085,8 @@ def test_the_options_reach_the_engine_service_and_the_session(tmp_path, monkeypa
 
 
 def test_an_unhealthy_engine_keeps_advice_off_until_the_panel_overrides_it(tmp_path, capsys):
-    run = CoachRun(tmp_path, engine_control={"health": {"service_version": "old"}})
+    old_service = {"service_version": "old", "game_version_target": "v0.107.1"}
+    run = CoachRun(tmp_path, engine_control={"health": old_service})
     reason = "the engine service did not report its native API version"
 
     def wait_for_ctrl_c():
@@ -1112,4 +1129,59 @@ def test_a_port_already_taken_stops_the_coach_at_once_and_leaves_nothing_running
         "running? Choose another port with --port."
     )
     assert took < UNDER_LOAD_S / 2
+    run.assert_all_stopped()
+
+
+def test_the_first_health_check_waits_for_a_slow_engine_start(tmp_path, monkeypatch):
+    # A cold start of the real service (uv, imports, the search workers) can outlast an
+    # ordinary request: the startup check waits up to the configured startup timeout.
+    run = CoachRun(tmp_path, engine_control={"health_delay_s": 1.0}, engine_start_timeout_s=30.0)
+    monkeypatch.setattr(
+        cli,
+        "EngineClient",
+        lambda cmd, *, workers: EngineClient(cmd, workers=workers, request_timeout_s=0.3),
+    )
+
+    def wait_for_ctrl_c():
+        run.steps.append("waited for Ctrl-C")
+        # The first verdict, before any later check of the engine could change it.
+        assert until(lambda: run.state()["status"] in ("advice", "advice_off"))
+        assert run.state()["status"] == "advice"  # not "... did not respond within 0.3s"
+        raise KeyboardInterrupt
+
+    assert run(window=False, wait_for_ctrl_c=wait_for_ctrl_c) == 0
+
+    assert run.steps == ["waited for Ctrl-C"]
+    assert [r["method"] for r in run.engine_requests()].count("health") == 1  # answered
+    run.assert_all_stopped()
+
+
+@pytest.mark.parametrize(
+    "broken, reason",
+    [
+        (
+            {"health": {"service_version": "old", "game_version_target": "v0.107.1"}},
+            "did not report its native API version",
+        ),
+        ({"crash_always": True}, "failed its health check"),  # the next check starts it anew
+    ],
+)
+def test_a_failing_engine_is_checked_again_and_advice_comes_on_without_a_restart(
+    tmp_path, monkeypatch, broken, reason
+):
+    run = CoachRun(tmp_path, engine_control=broken)
+    checked_often = functools.partial(CoachSettings, engine_recheck_s=0.2)
+    monkeypatch.setattr(cli, "CoachSettings", checked_often)
+
+    def wait_for_ctrl_c():
+        run.steps.append("waited for Ctrl-C")
+        assert run.shows("advice_off")
+        assert reason in run.state()["status_text"]
+        run.set_engine_control()  # the engine is fixed while the coach runs
+        assert run.shows("advice")
+        raise KeyboardInterrupt
+
+    assert run(window=False, wait_for_ctrl_c=wait_for_ctrl_c) == 0
+
+    assert run.steps == ["waited for Ctrl-C"]
     run.assert_all_stopped()

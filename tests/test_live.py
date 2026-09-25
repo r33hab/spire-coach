@@ -23,7 +23,7 @@ import pytest
 from coach.bridge.client import BridgeAuthError, BridgeUnavailable
 from coach.engine import Analysis, CheckResult, EngineError, EngineUnavailable, Move, MoveStat
 from coach.grader import Grade
-from coach.live import CoachSession, CoachSettings
+from coach.live import CoachSession, CoachSettings, engine_health_problems
 
 FIXTURES = Path(__file__).parent / "fixtures" / "mod"
 NOT_REACHABLE = "could not reach the mod: is the game running with the mod loaded?"
@@ -254,17 +254,32 @@ CLEAN_CHECK = CheckResult(
 )
 
 
+HEALTHY = {"service_version": "test-1", "native_api_version": 32, "game_version_target": "v0.107.1"}
+
+
 class FakeEngine:
     """Stands in for EngineClient. `respond(live)` returns the Analysis (or the
-    exception to raise) for a position; `check` does the same for a fidelity check."""
+    exception to raise) for a position; `check` does the same for a fidelity check.
+    `healths` are the answers (or exceptions) to the health checks, in turn; the last
+    one repeats."""
 
-    def __init__(self, respond, *, check=None):
+    def __init__(self, respond, *, check=None, healths=(HEALTHY,)):
         self.respond = respond
         self.check_respond = check or (lambda pre, move, post: CLEAN_CHECK)
+        self.healths = list(healths)
         self.analyze_calls = []
         self.check_calls = []
+        self.health_calls = []  # the timeout of each health check
         self._gate = None
         self.holding = threading.Event()  # set once an analysis is being held
+
+    def start(self):
+        pass
+
+    def health(self, *, timeout_s=None):
+        self.health_calls.append(timeout_s)
+        outcome = self.healths.pop(0) if len(self.healths) > 1 else self.healths[0]
+        return self._answer(outcome() if callable(outcome) else outcome)
 
     def hold(self, predicate):
         """Hold every analysis whose live snapshot matches `predicate` until the
@@ -1283,6 +1298,138 @@ def test_an_engine_that_failed_its_startup_health_check_counts_as_a_version_prob
     ) in latest(published).recommendation["warnings"]
 
 
+@pytest.mark.parametrize(
+    "health, problems",
+    [
+        (HEALTHY, []),
+        (
+            {"game_version_target": "v0.107.1"},
+            ["the engine service did not report its native API version"],
+        ),
+        (
+            {**HEALTHY, "game_version_target": "v0.111.0"},
+            ["the engine service targets game version v0.111.0, not v0.107.1"],
+        ),
+        (
+            {"native_api_version": 32},
+            ["the engine service did not report the game version it targets"],
+        ),
+        (
+            EngineUnavailable("could not start the engine service:\n no uv"),
+            [
+                "the engine service failed its health check "
+                "(could not start the engine service: no uv)"
+            ],
+        ),
+    ],
+)
+def test_the_engines_health_check_says_what_keeps_advice_off(health, problems):
+    engine = FakeEngine(standard_analysis, healths=[health])
+
+    assert engine_health_problems(engine, timeout_s=90.0) == problems
+    assert engine.health_calls == [90.0]
+
+
+def test_a_failing_engine_is_checked_again_and_advice_comes_on_once_it_is_healthy(
+    make_session, tmp_path
+):
+    # The coach needs no restart once the engine works (a slow first start, say).
+    settings = CoachSettings(engine_recheck_s=0.0, engine_start_timeout_s=12.5)
+    bridge = FakeBridge()
+    engine = FakeEngine(
+        standard_analysis,
+        healths=[EngineUnavailable("the engine service closed its output"), HEALTHY],
+    )
+    session, published = make_session(
+        bridge, engine, settings, engine_problems=["the engine service failed its health check"]
+    )
+
+    settle(session, bridge, combat(seq=12))
+    step_until(session, advising(published), timeout=UNDER_LOAD_S)
+
+    assert engine.health_calls == [12.5, 12.5]  # still failing once, then healthy
+    assert latest(published).versions.ok is True
+    assert any("closed its output" in state.status_text for state in published)
+    assert [r["problems"] for r in run_log(tmp_path, "engine_health")] == [
+        ["the engine service failed its health check (the engine service closed its output)"],
+        [],
+    ]
+
+
+def test_a_failing_engine_is_checked_again_only_once_the_interval_is_up(make_session):
+    settings = CoachSettings(engine_recheck_s=3600.0)
+    bridge = FakeBridge()
+    engine = FakeEngine(standard_analysis)
+    session, published = make_session(
+        bridge, engine, settings, engine_problems=["the engine service failed its health check"]
+    )
+
+    settle(session, bridge, combat(seq=12))
+    for _ in range(5):
+        session.step()
+
+    assert engine.health_calls == []  # checked at startup a moment ago
+    assert latest(published).status == "advice_off"
+
+
+def test_a_restart_of_the_engine_service_brings_the_next_check_forward(make_session):
+    # A service the client restarted may work where the old one did not.
+    settings = CoachSettings(engine_recheck_s=3600.0)
+    bridge = FakeBridge()
+    engine = FakeEngine(standard_analysis)
+    session, published = make_session(
+        bridge, engine, settings, engine_problems=["the engine service failed its health check"]
+    )
+    settle(session, bridge, combat(seq=12))
+    assert engine.health_calls == []
+
+    engine.on_restart()  # the client restarted the service, for any request
+    step_until(session, advising(published), timeout=UNDER_LOAD_S)
+
+    assert len(engine.health_calls) == 1
+
+
+def test_a_restart_during_the_check_itself_does_not_start_another_check(make_session):
+    settings = CoachSettings(engine_recheck_s=0.0)
+    bridge = FakeBridge()
+
+    def restarts_and_fails():
+        engine.on_restart()  # the client restarts the service within this very check
+        return EngineUnavailable("engine service unavailable after a restart")
+
+    engine = FakeEngine(standard_analysis, healths=[restarts_and_fails])
+    session, published = make_session(
+        bridge, engine, settings, engine_problems=["the engine service failed its health check"]
+    )
+    settle(session, bridge, combat(seq=12))
+    step_until(session, lambda: engine.health_calls, timeout=UNDER_LOAD_S)
+    settings.engine_recheck_s = 3600.0  # from now on, only a restart could bring a check on
+    step_until(
+        session,
+        lambda: "after a restart" in latest(published).status_text,
+        timeout=UNDER_LOAD_S,
+    )
+    for _ in range(5):
+        session.step()
+
+    assert len(engine.health_calls) == 1
+
+
+def test_a_healthy_engine_is_not_checked_again(make_session):
+    settings = CoachSettings(engine_recheck_s=0.0)
+    bridge = FakeBridge()
+    engine = FakeEngine(standard_analysis)
+    session, published = make_session(bridge, engine, settings)
+
+    settle(session, bridge, combat(seq=12))
+    step_until(session, advising(published), timeout=UNDER_LOAD_S)
+    engine.on_restart()
+    for _ in range(5):
+        session.step()
+
+    assert engine.health_calls == []
+
+
 def test_the_clients_own_restart_shows_engine_restarting_then_advice(make_session):
     # Ruling (Review Focus 2): the session hears the client restart the service
     # through its on_restart, while the position on screen waits for its analysis.
@@ -1643,8 +1790,9 @@ def test_close_waits_out_an_analysis_and_its_retry_and_reports_whether_it_ended(
         return real_close(timeout)
 
     monkeypatch.setattr(session._worker, "close", spy)
+    assert session.close_timeout_s == 2 * (2 * 2.0 + 5.0)  # the bound the coach waits on
     assert session.close() is True
-    assert waited == [2 * (2 * 2.0 + 5.0)]
+    assert waited == [session.close_timeout_s]
 
     monkeypatch.setattr(session._worker, "close", lambda timeout: False)
     assert session.close() is False

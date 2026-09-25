@@ -36,8 +36,8 @@ from coach.config import (
     load_config,
     read_token,
 )
-from coach.engine import EngineClient, EngineError
-from coach.live import MODES, CoachSession, CoachSettings
+from coach.engine import EngineClient
+from coach.live import MODES, CoachSession, CoachSettings, engine_health_problems
 from coach.modinstall import (
     DLL_NAME,
     MANIFEST_NAME,
@@ -49,7 +49,7 @@ from coach.modinstall import (
 from coach.runlog import RunLog
 from coach.saves import SaveError, backup, find_steam_dir, game_is_running, restore, seed_modded
 from coach.server import DEFAULT_PORT, HOST, Broadcaster, create_app, create_server
-from coach.view import CoachState, compose, one_line, sentence
+from coach.view import CoachState, compose, sentence
 from coach.window import open_window
 
 DEFAULT_BACKUP_ROOT = Path.home() / "Documents" / "spire-coach-backups"
@@ -349,7 +349,10 @@ def cmd_coach(
     service's launch command (tests run a fake service).
     """
     settings = CoachSettings(
-        mode=mode, time_budget_s=budget_s, poll_interval_s=config.poll_interval_s
+        mode=mode,
+        time_budget_s=budget_s,
+        poll_interval_s=config.poll_interval_s,
+        engine_start_timeout_s=config.engine_start_timeout_s,
     )
     coach = _LiveCoach(
         client_factory(config.base_url, config.token),
@@ -388,7 +391,11 @@ class _LiveCoach:
 
     def start(self, data_dir: Path, port: int) -> None:
         print("Starting the engine service…", flush=True)
-        problems = _engine_problems(self._engine)
+        # A cold start of the service can take a while: this first check may wait for
+        # it. The session checks a failing engine again by itself.
+        problems = engine_health_problems(
+            self._engine, timeout_s=self._settings.engine_start_timeout_s
+        )
         for problem in problems:
             print(
                 f"{sentence(f'Advice is off: {problem}')} Turn on the version override in "
@@ -449,24 +456,6 @@ class _LiveCoach:
             self._session.set_mode(update["mode"])
         if "override_versions" in update:
             self._settings.override_versions = update["override_versions"]
-
-
-def _engine_problems(engine: EngineClient) -> list[str]:
-    """Start the engine service and check its health: what is wrong with it, if anything.
-
-    Advice needs the service healthy and reporting the native API version it runs (spec
-    5.3 checks the simulator's Sts2_NativeApiVersion at startup), just as it needs the
-    right game and mod versions. A problem here turns advice off, with the reason, unless
-    the version override is on.
-    """
-    try:
-        engine.start()
-        health = engine.health()
-    except EngineError as exc:
-        return [f"the engine service failed its health check ({one_line(exc)})"]
-    if not isinstance(health, dict) or health.get("native_api_version") is None:
-        return ["the engine service did not report its native API version"]
-    return []
 
 
 class _PanelFeed:
