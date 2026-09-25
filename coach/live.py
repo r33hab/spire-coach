@@ -73,7 +73,7 @@ from coach.view import (
     sentence,
     ungraded_dict,
 )
-from coach.worker import Job, Worker
+from coach.worker import SKIPPED, Job, Worker
 
 MODES = ("show", "quiz")
 
@@ -128,7 +128,9 @@ class _Position:
 
     `status`: "none" (not a combat decision), "new", "blocked" (versions don't match),
     "unreadable" (no live snapshot), "pending" (analysis queued or running),
-    "restarting" (analysis retried after the engine went down), "done", "failed".
+    "restarting" (analysis retried after the engine went down), "skipped" (its turn
+    came when nothing needed it: it is queued again if a move from it turns up),
+    "done", "failed".
     """
 
     fingerprint: str
@@ -142,6 +144,7 @@ class _Position:
     error: str | None = None
     retried: bool = False
     revealed: bool = False  # a move from it was graded: quiz mode may show its advice
+    waiting_moves: int = 0  # queued grades that need its analysis
 
 
 @dataclass(eq=False)
@@ -394,6 +397,9 @@ class CoachSession:
         base = latest if latest is not None else since
         self._last_seq = max([base, *(entry["seq"] for entry in entries)])
         self._seen.clear()
+        for item in self._pending_grades:
+            if item.pre is not None:
+                item.pre.position.waiting_moves -= 1
         self._pending_grades.clear()
         self._pending_checks.clear()
         self._sources.clear()
@@ -408,7 +414,7 @@ class CoachSession:
             return  # Review Focus 3: a move the api made is never graded
         if entry.get("kind") not in _GRADABLE_ENTRY_KINDS or entry.get("round") is None:
             return  # ruling R4: only in-combat moves are graded
-        self._pending_grades.append(_PendingGrade(pre=self._find_pre(entry), entry=entry))
+        self._queue_grade(_PendingGrade(pre=self._find_pre(entry), entry=entry))
         self._process_grades()
 
     def _find_pre(self, entry: dict) -> _Seen | None:
@@ -431,7 +437,7 @@ class CoachSession:
         return self._versions.ok or self._settings.override_versions
 
     def _maybe_analyze(self, position: _Position) -> None:
-        if position.status not in ("new", "blocked"):
+        if position.status not in ("new", "blocked", "skipped"):
             return
         if not self._advice_allowed():
             position.status = "blocked"
@@ -462,16 +468,29 @@ class CoachSession:
         position.live_warnings = warnings
         return True
 
-    def _submit_analysis(self, position: _Position) -> None:
+    def _submit_analysis(self, position: _Position, *, urgent: bool = True) -> None:
         live, budget = position.live, self._settings.time_budget_s
         job = Job(
             lambda: self._engine.analyze(live, time_budget_s=budget),
             context=("analysis", position),
+            # Asked on the worker thread when the job's turn comes: an analysis of a
+            # position that is off screen with no move waiting on it is skipped (review
+            # minor 2). A stale answer only costs a skip, which _process_grades undoes
+            # if a move from it turns up after all.
+            wanted=lambda: position is self._current or position.waiting_moves > 0,
         )
-        self._worker.submit(job, urgent=True)
+        self._worker.submit(job, urgent=urgent)
 
     def _on_analysis(self, position: _Position, outcome: object) -> None:
         current = position is self._current
+        if outcome is SKIPPED:
+            position.status = "skipped"
+            self._runlog.append(
+                "analysis",
+                {"fingerprint": position.fingerprint, "current": current, "skipped": True},
+            )
+            self._process_grades()
+            return
         record = {"fingerprint": position.fingerprint, "current": current, "live": position.live}
         if isinstance(outcome, Analysis):
             position.analysis = outcome
@@ -515,15 +534,27 @@ class CoachSession:
             or self._sources.get(previous.seq) == "api"  # the api is playing, not the player
         ):
             return
-        self._pending_grades.append(_PendingGrade(pre=previous, entry=None, post=seen))
+        self._queue_grade(_PendingGrade(pre=previous, entry=None, post=seen))
+
+    def _queue_grade(self, item: _PendingGrade) -> None:
+        if item.pre is not None:
+            item.pre.position.waiting_moves += 1  # so its analysis is never skipped
+        self._pending_grades.append(item)
 
     def _process_grades(self) -> None:
         """Grade every waiting move whose position's analysis has resolved, in order."""
         while self._pending_grades:
             item = self._pending_grades[0]
-            if item.pre is not None and item.pre.position.status in _IN_FLIGHT:
+            position = item.pre.position if item.pre is not None else None
+            if position is not None and position.status == "skipped":
+                # Its turn came before this move turned up: analyze it after all.
+                position.status = "pending"
+                self._submit_analysis(position, urgent=False)
+            if position is not None and position.status in _IN_FLIGHT:
                 break  # the moves after it wait too, so grades reach the panel in order
             self._pending_grades.popleft()
+            if position is not None:
+                position.waiting_moves -= 1
             if item.entry is not None:
                 self._grade_move(item)
             else:

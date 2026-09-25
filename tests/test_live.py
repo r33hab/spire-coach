@@ -747,6 +747,62 @@ def test_a_move_clicked_between_the_two_polls_that_settle_a_position_is_matched_
     assert graded["label"] == "Inaccuracy"  # graded on P0, not left Ungraded
 
 
+def test_an_analysis_nobody_needs_any_more_is_skipped(make_session, tmp_path):
+    # Review minor 2. P1 is left by an api move, so no grade needs its analysis;
+    # by its turn it is not on screen either. It is skipped, and the grade for the
+    # move from P2 does not wait behind it.
+    bridge = FakeBridge()
+    engine = FakeEngine(standard_analysis)
+    release_p0 = engine.hold(lambda live: "c1" in hand_uids(live))
+    session, published = make_session(bridge, engine)
+    settle(session, bridge, combat(seq=12))
+    act(session, bridge, play(13, "c1", "JAW_WORM_0"), combat(seq=13, hand=P1_HAND))
+    act(session, bridge, play(14, "c2", source="api"), combat(seq=14, hand=P2_HAND))
+    act(session, bridge, play(15, "c4"), combat(seq=15, hand=("c3",)))
+
+    release_p0.set()
+    step_until(session, lambda: len(grade_history(published)) == 2)
+    step_until(session, advising(published))
+
+    assert [hand_uids(live) for live, _ in engine.analyze_calls] == [
+        ["c1", "c2", "c3", "c4"],
+        ["c3"],  # P3, on screen, first
+        ["c3", "c4"],  # then P2, for the grade; P1 never
+    ]
+    assert [(g["played"]["card_uid"], g["label"]) for g in grade_history(published)] == [
+        ("c1", "Inaccuracy"),
+        ("c4", "Best"),
+    ]
+    assert [r["skipped"] for r in run_log(tmp_path, "analysis") if "skipped" in r] == [True]
+
+
+def test_a_skipped_analysis_a_late_move_turns_out_to_need_is_run_after_all(make_session, tmp_path):
+    bridge = FakeBridge()
+    engine = FakeEngine(standard_analysis)
+    release_p0 = engine.hold(lambda live: "c1" in hand_uids(live))
+    session, published = make_session(bridge, engine)
+    settle(session, bridge, combat(seq=12))
+    act(session, bridge, play(13, "c1", "JAW_WORM_0"), combat(seq=13, hand=P1_HAND))
+    # Whirlwind is played from P1, but the log only hands it over later.
+    bridge.visible_up_to = 13
+    act(session, bridge, play(14, "c2"), combat(seq=14, hand=P2_HAND))
+
+    release_p0.set()
+    step_until(session, lambda: any(r.get("skipped") for r in run_log(tmp_path, "analysis")))
+    bridge.visible_up_to = None
+    step_until(session, lambda: len(grade_history(published)) == 2)
+
+    assert [(g["played"]["card_uid"], g["label"]) for g in grade_history(published)] == [
+        ("c1", "Inaccuracy"),
+        ("c2", "Best"),  # graded on P1's analysis after all
+    ]
+    assert [hand_uids(live) for live, _ in engine.analyze_calls] == [
+        ["c1", "c2", "c3", "c4"],
+        ["c3", "c4"],
+        ["c2", "c3", "c4"],
+    ]
+
+
 # --- Review Focus 3: several actions between two polls --------------------------------
 
 

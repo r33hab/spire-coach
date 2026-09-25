@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 import time
 
-from coach.worker import Job, Worker
+from coach.worker import SKIPPED, Job, Worker
 
 
 def wait_until(condition, timeout=5.0):
@@ -74,3 +74,25 @@ def test_close_drops_queued_jobs_and_reports_whether_the_thread_finished():
     assert worker.close(5) is True
 
     assert [context for context, _ in delivered] == ["running"]
+
+
+def test_a_job_nobody_wants_by_its_turn_is_skipped_instead_of_run():
+    gate, started = threading.Event(), threading.Event()
+    worker, delivered = make_worker()
+    ran = []
+    still_wanted = {"stale": True}
+    try:
+        worker.submit(Job(blocker(gate, started), context="running"))
+        assert started.wait(5)
+        worker.submit(
+            Job(lambda: ran.append("stale"), context="stale", wanted=lambda: still_wanted["stale"])
+        )
+        worker.submit(Job(lambda: ran.append("needed"), context="needed", wanted=lambda: True))
+        still_wanted["stale"] = False  # asked when its turn comes, not when submitted
+        gate.set()
+        wait_until(lambda: len(delivered) == 3)
+    finally:
+        assert worker.close(5)
+
+    assert ran == ["needed"]
+    assert delivered[1] == ("stale", SKIPPED)

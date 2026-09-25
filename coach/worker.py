@@ -3,8 +3,10 @@
 The live coach runs every engine call here (coach/live.py): the analysis of the
 position on screen is submitted as urgent and goes next, and everything else (an older
 position's analysis that a grade still needs, a fidelity check) runs after it, in
-submission order. Each job's outcome, its result or the exception it raised, is handed
-to `deliver` on the worker thread; what it means is the caller's business.
+submission order. A job may say, through `wanted`, whether it is still needed when its
+turn comes: one that is not is skipped instead of run. Each job's outcome, its result,
+the exception it raised, or SKIPPED, is handed to `deliver` on the worker thread; what
+it means is the caller's business.
 """
 
 from __future__ import annotations
@@ -14,11 +16,16 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 
+SKIPPED = object()  # the outcome of a job whose `wanted` said no when its turn came
+
 
 @dataclass(eq=False)
 class Job:
     run: Callable[[], object]
     context: object = None  # the caller's own record of what the job is for
+    # Asked when the job's turn comes, on the worker thread; if it says no, the job is
+    # not run and its outcome is SKIPPED. None means always wanted.
+    wanted: Callable[[], bool] | None = None
 
 
 class Worker:
@@ -54,16 +61,30 @@ class Worker:
         return not self._thread.is_alive()
 
     def _take(self) -> Job | None:
-        with self._cond:
-            while not self._jobs and not self._closed:
-                self._cond.wait()
-            if self._closed:
-                return None
-            job = self._urgent if self._urgent is not None else self._jobs[0]
-            self._jobs.remove(job)
-            if job is self._urgent:
-                self._urgent = None
-            return job
+        """The next job to run, or None once closed. A job nobody wants any more is
+        delivered as SKIPPED here, and the one after it taken instead."""
+        while True:
+            with self._cond:
+                while not self._jobs and not self._closed:
+                    self._cond.wait()
+                if self._closed:
+                    return None
+                job = self._urgent if self._urgent is not None else self._jobs[0]
+                self._jobs.remove(job)
+                if job is self._urgent:
+                    self._urgent = None
+            if self._still_wanted(job):
+                return job
+            self._deliver(job, SKIPPED)
+
+    @staticmethod
+    def _still_wanted(job: Job) -> bool:
+        if job.wanted is None:
+            return True
+        try:
+            return bool(job.wanted())
+        except Exception:  # a broken predicate costs a skip, never the job itself
+            return True
 
     def _loop(self) -> None:
         while (job := self._take()) is not None:
