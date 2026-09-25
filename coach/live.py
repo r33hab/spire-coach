@@ -9,7 +9,8 @@ reads the mod's action log: each in-combat move a human made is graded against t
 analysis of the position it was made from, and once the next position settles, the
 move is fidelity-checked (`engine.check`) in the background, with any mismatch written
 to `<data_dir>/gaps/<ts>.json`. States, moves, analyses, grades and checks all go to
-the run log.
+the run log. What the panel shows is built by coach/view.py; the background thread is
+coach/worker.py.
 
 Matching a move to its position. An action-log entry names no position, only a seq,
 and every state the mod reports carries `action_log_seq`, the newest seq at that
@@ -40,9 +41,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import json
-import math
 import queue
-import threading
 import time
 from collections import deque
 from collections.abc import Callable
@@ -61,17 +60,20 @@ from coach.bridge.decisions import (
     is_settled,
 )
 from coach.bridge.versions import VersionStatus, check_versions, read_game_version
-from coach.engine import (
-    Analysis,
-    CheckResult,
-    EngineClient,
-    EngineError,
-    EngineUnavailable,
-    Move,
-    MoveStat,
-)
+from coach.engine import Analysis, CheckResult, EngineClient, EngineError, EngineUnavailable, Move
 from coach.runlog import RunLog
 from coach.snapshot import SnapshotError, build_live_snapshot
+from coach.view import (
+    CoachState,
+    compose,
+    grade_dict,
+    mismatch_sentence,
+    one_line,
+    plain_move,
+    sentence,
+    ungraded_dict,
+)
+from coach.worker import Job, Worker
 
 MODES = ("show", "quiz")
 
@@ -85,14 +87,10 @@ _IN_FLIGHT = frozenset({"pending", "restarting"})
 
 _SEEN_MAX = 64  # settled positions kept for matching moves to where they were made
 _SOURCES_MAX = 256  # recent action-log seqs whose source (human/api) is remembered
-_ALTERNATIVES_MAX = 3
 _FIDELITY_WINDOW_MOVES = 10  # spec 6.3: a mismatch keeps its warning up for 10 moves
-_DEATH_VALUE_HP = -100.0  # spec 7.2 (the search's DEATH_VALUE): what a death is worth
 _WAITING_POLL_S = 1.0  # retry interval while the game is unreachable, as capture uses
 _WORKER_JOIN_S = 5.0
 
-_MOVE_FIELDS = tuple(f.name for f in dataclasses.fields(Move))
-_MOVE_IDENTITY_FIELDS = tuple(name for name in _MOVE_FIELDS if name != "label")
 _UNIDENTIFIED_SELECTION = Move(
     kind="select",
     card_index=None,
@@ -104,9 +102,6 @@ _UNIDENTIFIED_SELECTION = Move(
     select_index=None,
     label="Card selection",
 )
-
-
-# --- settings and the published state ------------------------------------------------
 
 
 @dataclass
@@ -122,25 +117,6 @@ class CoachSettings:
     # What the engine's value counts per potion still held (spec 7.2: 10 HP by
     # default); must match the engine's own setting to read HP loss off its values.
     potion_value_hp: float = 10.0
-
-
-@dataclass(frozen=True)
-class CoachState:
-    """What the panel shows. Published whole on every change."""
-
-    status: str  # waiting_for_game | idle | thinking | advice | advice_off | engine_restarting
-    status_text: str  # one readable sentence
-    recommendation: dict | None
-    last_grade: dict | None
-    mode: str
-    versions: VersionStatus
-    run: dict
-
-    def to_dict(self) -> dict:
-        return _json_safe(dataclasses.asdict(self))
-
-    def to_json(self) -> str:
-        return json.dumps(self.to_dict(), allow_nan=False)
 
 
 # --- what the session keeps ----------------------------------------------------------
@@ -198,72 +174,8 @@ class _PendingCheck:
     move_number: int  # which graded move this was, for the warning window
 
 
-@dataclass(eq=False)
-class _Job:
-    kind: str  # "analysis" | "check"
-    run: Callable[[], object]
-    context: object
-
-
 _REFRESH = object()  # a message asking the session thread to republish
 _GONE = object()  # a position that fell out of the timeline
-
-
-# --- the engine worker ---------------------------------------------------------------
-
-
-class _Worker:
-    """The one background thread every engine call runs on.
-
-    The newest position's analysis always goes next, so the panel catches up with the
-    game first. Everything else, including an older position's analysis that a grade
-    still needs, runs in submission order after it. Each job's outcome, its result or
-    the exception it raised, is handed to `deliver`.
-    """
-
-    def __init__(self, deliver: Callable[[_Job, object], None]) -> None:
-        self._deliver = deliver
-        self._cond = threading.Condition()
-        self._jobs: deque[_Job] = deque()
-        self._urgent: _Job | None = None
-        self._closed = False
-        self._thread = threading.Thread(target=self._loop, name="coach-engine", daemon=True)
-        self._thread.start()
-
-    def submit(self, job: _Job, *, urgent: bool = False) -> None:
-        with self._cond:
-            self._jobs.append(job)
-            if urgent:
-                self._urgent = job
-            self._cond.notify()
-
-    def close(self, timeout: float) -> None:
-        with self._cond:
-            self._closed = True
-            self._jobs.clear()
-            self._urgent = None
-            self._cond.notify_all()
-        self._thread.join(timeout)
-
-    def _take(self) -> _Job | None:
-        with self._cond:
-            while not self._jobs and not self._closed:
-                self._cond.wait()
-            if self._closed:
-                return None
-            job = self._urgent if self._urgent is not None else self._jobs[0]
-            self._jobs.remove(job)
-            if job is self._urgent:
-                self._urgent = None
-            return job
-
-    def _loop(self) -> None:
-        while (job := self._take()) is not None:
-            try:
-                outcome = job.run()
-            except Exception as exc:  # delivered, not raised: the session decides
-                outcome = exc
-            self._deliver(job, outcome)
 
 
 # --- the session ---------------------------------------------------------------------
@@ -291,7 +203,9 @@ class CoachSession:
         self._settings = settings
         self._runlog = RunLog(self._data_dir)
         self._results: queue.SimpleQueue = queue.SimpleQueue()
-        self._worker = _Worker(lambda job, outcome: self._results.put((job, outcome)))
+        self._worker = Worker(
+            lambda job, outcome: self._results.put((job, outcome)), name="coach-engine"
+        )
         self._stabilizer = Stabilizer()
         self._streak_fingerprint: str | None = None
         self._streak_seq: int | None = None
@@ -328,7 +242,7 @@ class CoachSession:
             self._poll_actions(state)
         except BridgeError as exc:
             self._connected = False
-            self._bridge_problem = _one_line(exc)
+            self._bridge_problem = one_line(exc)
         self._retry_blocked()
         self._apply_results()
         self._refresh()
@@ -523,7 +437,7 @@ class CoachSession:
             )
         except SnapshotError as exc:
             position.status = "unreadable"
-            position.error = _one_line(exc)
+            position.error = one_line(exc)
             self._runlog.append(
                 "analysis",
                 {"fingerprint": position.fingerprint, "error": f"snapshot: {position.error}"},
@@ -534,7 +448,10 @@ class CoachSession:
 
     def _submit_analysis(self, position: _Position) -> None:
         live, budget = position.live, self._settings.time_budget_s
-        job = _Job("analysis", lambda: self._engine.analyze(live, time_budget_s=budget), position)
+        job = Job(
+            lambda: self._engine.analyze(live, time_budget_s=budget),
+            context=("analysis", position),
+        )
         self._worker.submit(job, urgent=True)
 
     def _on_analysis(self, position: _Position, outcome: object) -> None:
@@ -546,7 +463,7 @@ class CoachSession:
             record["snapshot_warnings"] = position.live_warnings
             record["analysis"] = dataclasses.asdict(outcome)
         else:
-            message = _one_line(outcome)
+            message = one_line(outcome)
             record["error"] = message
             if isinstance(outcome, EngineUnavailable) and current and not position.retried:
                 # The client already restarted the service once; start it afresh and
@@ -604,14 +521,14 @@ class CoachSession:
         if analysis is not None:
             stat = grader.identify_move(entry, position.live, analysis)
         if stat is not None:
-            graded = _grade_dict(grader.grade(stat, analysis, self._settings.thresholds))
+            graded = grade_dict(grader.grade(stat, analysis, self._settings.thresholds))
         else:
             played = _move_from_entry(entry, position.state if position is not None else None)
-            graded = _ungraded_dict(played, analysis)
+            graded = ungraded_dict(played, analysis)
         number = self._record_grade(graded, position, seq=entry["seq"], entry=entry)
         if stat is not None:
             self._pending_checks.append(
-                _PendingCheck(item.pre, entry["seq"], _plain_move(stat), number)
+                _PendingCheck(item.pre, entry["seq"], plain_move(stat), number)
             )
 
     def _grade_selection(self, item: _PendingGrade) -> None:
@@ -623,13 +540,13 @@ class CoachSession:
         if found is not None:
             # grade_selection grades on the default thresholds: regrade its pick on
             # the configured ones.
-            graded = _grade_dict(grader.grade(found.played, analysis, self._settings.thresholds))
+            graded = grade_dict(grader.grade(found.played, analysis, self._settings.thresholds))
         else:
-            graded = _ungraded_dict(_UNIDENTIFIED_SELECTION, analysis)
+            graded = ungraded_dict(_UNIDENTIFIED_SELECTION, analysis)
         number = self._record_grade(graded, position, seq=item.pre.seq, entry=None)
         if found is not None:
             self._pending_checks.append(
-                _PendingCheck(item.pre, item.pre.seq, _plain_move(found.played), number)
+                _PendingCheck(item.pre, item.pre.seq, plain_move(found.played), number)
             )
 
     def _record_grade(
@@ -685,11 +602,10 @@ class CoachSession:
     def _submit_check(self, check: _PendingCheck, after: _Seen) -> None:
         pre, post, move = check.pre.position.live, after.position.live, check.move
         self._worker.submit(
-            _Job("check", lambda: self._engine.check(pre, move, post), (check, after))
+            Job(lambda: self._engine.check(pre, move, post), context=("check", check, after))
         )
 
-    def _on_check(self, context: tuple[_PendingCheck, _Seen], outcome: object) -> None:
-        check, after = context
+    def _on_check(self, check: _PendingCheck, after: _Seen, outcome: object) -> None:
         record = {
             "pre_fingerprint": check.pre.position.fingerprint,
             "post_fingerprint": after.position.fingerprint,
@@ -700,16 +616,14 @@ class CoachSession:
             if outcome.deterministic_mismatches or outcome.implausible:
                 gap = self._write_gap(check, after, outcome)
                 record["gap"] = str(gap)
-                self._notes.append(
-                    (check.move_number, _mismatch_sentence(check.move, outcome, gap))
-                )
+                self._notes.append((check.move_number, mismatch_sentence(check.move, outcome, gap)))
             self._notes += [(check.move_number, text) for text in outcome.warnings]
         else:
-            record["error"] = _one_line(outcome)
+            record["error"] = one_line(outcome)
             self._notes.append(
                 (
                     check.move_number,
-                    _sentence(
+                    sentence(
                         f"The fidelity check after {check.move.label} failed: {record['error']}"
                     ),
                 )
@@ -733,6 +647,16 @@ class CoachSession:
         }
         path.write_text(json.dumps(report, indent=2), encoding="utf-8")
         return path
+
+    def _fidelity_warnings(self) -> list[str]:
+        """The fidelity warnings of the last 10 graded moves (spec 6.3); older ones
+        are dropped for good."""
+        self._notes = [
+            (number, text)
+            for number, text in self._notes
+            if self._moves_graded - number < _FIDELITY_WINDOW_MOVES
+        ]
+        return [text for _, text in self._notes]
 
     # --- engine results --------------------------------------------------------------
 
@@ -758,14 +682,15 @@ class CoachSession:
         """Apply one worker result, and show what it changed before the next one."""
         if message is not _REFRESH:
             job, outcome = message
-            if job.kind == "analysis":
-                self._on_analysis(job.context, outcome)
+            kind, *context = job.context
+            if kind == "analysis":
+                self._on_analysis(*context, outcome)
             else:
-                self._on_check(job.context, outcome)
+                self._on_check(*context, outcome)
         self._refresh()
 
     def _on_internal_error(self, exc: Exception) -> None:
-        self._internal_error = f"{type(exc).__name__}: {_one_line(exc)}"
+        self._internal_error = f"{type(exc).__name__}: {one_line(exc)}"
         with contextlib.suppress(Exception):
             self._runlog.append("error", {"error": self._internal_error})
         with contextlib.suppress(Exception):
@@ -774,158 +699,23 @@ class CoachSession:
     # --- the panel -------------------------------------------------------------------
 
     def _refresh(self) -> None:
-        state = self._compose()
+        state = compose(
+            self._current,
+            connected=self._connected,
+            bridge_problem=self._bridge_problem,
+            internal_error=self._internal_error,
+            versions=self._versions,
+            override_versions=self._settings.override_versions,
+            mode=self._mode,
+            last_grade=self._last_grade,
+            run=self._run,
+            fidelity_warnings=self._fidelity_warnings(),
+            z=self._settings.thresholds.z,
+            potion_value_hp=self._settings.potion_value_hp,
+        )
         if state != self._published:
             self._published = state
             self._publish(state)
-
-    def _compose(self) -> CoachState:
-        def shown(status: str, text: str, recommendation: dict | None = None) -> CoachState:
-            return CoachState(
-                status=status,
-                status_text=text,
-                recommendation=recommendation,
-                last_grade=self._last_grade,
-                mode=self._mode,
-                versions=self._versions,
-                run=dict(self._run),
-            )
-
-        if self._internal_error is not None:
-            return shown(
-                "advice_off",
-                _sentence(
-                    f"Advice is off: the coach hit an internal error ({self._internal_error})"
-                ),
-            )
-        if not self._connected:
-            if self._bridge_problem:
-                return shown(
-                    "waiting_for_game", _sentence(f"Waiting for the game: {self._bridge_problem}")
-                )
-            return shown("waiting_for_game", "Waiting for the game.")
-        position = self._current
-        if position is None:
-            return shown("idle", "Connected: waiting for a combat decision.")
-        if not self._advice_allowed():
-            problems = _sentence("Advice is off: " + "; ".join(self._versions.problems))
-            return shown(
-                "advice_off",
-                f"{problems} Turn on the version override in the settings to see advice anyway.",
-            )
-        if position.status == "unreadable":
-            return shown(
-                "advice_off",
-                _sentence(
-                    f"Advice is off for this position: the coach could not read it "
-                    f"({position.error})"
-                ),
-            )
-        if position.status == "failed":
-            return shown(
-                "advice_off", _sentence(f"Advice is off for this position: {position.error}")
-            )
-        if position.status == "restarting":
-            return shown(
-                "engine_restarting",
-                _sentence(f"The engine service stopped ({position.error}); restarting it"),
-            )
-        if position.status != "done":
-            return shown("thinking", "Analyzing this position…")
-        recommendation = self._recommendation(position)
-        return shown("advice", self._advice_text(position, recommendation), recommendation)
-
-    def _advice_text(self, position: _Position, recommendation: dict) -> str:
-        if recommendation["best"] is None:
-            return "Quiz: make your move, then see its grade and the best move."
-        if not position.analysis.reliable:
-            return "Advice ready, but unreliable: see the warnings."
-        return "Advice ready."
-
-    def _recommendation(self, position: _Position) -> dict:
-        analysis = position.analysis
-        hidden = self._mode == "quiz" and not position.revealed
-        best_stat = next((s for s in analysis.moves if _same_move(s, analysis.best)), None)
-        return {
-            "best": None if hidden else _move_dict(analysis.best),
-            "line": None if hidden else [_move_dict(move) for move in analysis.line],
-            "alternatives": None if hidden else self._alternatives(analysis),
-            "expected_hp_loss": self._expected_hp_loss(position.live, best_stat),
-            "p_death": _finite(best_stat.p_death) if best_stat is not None else None,
-            "reliable": analysis.reliable,
-            "warnings": self._warnings(position),
-        }
-
-    def _alternatives(self, analysis: Analysis) -> list[dict]:
-        """The cheapest other moves, each with its paired cost against the best one."""
-        others = [stat for stat in analysis.moves if not _same_move(stat, analysis.best)]
-        others.sort(
-            key=lambda stat: (
-                _finite(stat.paired_diff_vs_best) is None,
-                _finite(stat.paired_diff_vs_best) or 0.0,
-            )
-        )
-        alternatives = []
-        for stat in others[:_ALTERNATIVES_MAX]:
-            diff = _finite(stat.paired_diff_vs_best)
-            stderr = _finite(stat.paired_diff_stderr)
-            lower = None
-            if diff is not None and stderr is not None:
-                lower = diff - self._settings.thresholds.z * stderr
-            alternatives.append(
-                {
-                    "move": _move_dict(stat),
-                    "cost_mean_hp": diff,
-                    "cost_lower_hp": lower,
-                    "p_death_delta": _finite(stat.paired_death_diff_vs_best),
-                }
-            )
-        return alternatives
-
-    def _expected_hp_loss(self, live: dict, best_stat: MoveStat | None) -> float | None:
-        """HP the best line is expected to lose if the fight is won.
-
-        The engine's value is end HP plus `potion_value_hp` per potion still held, or
-        -100 for a death (spec 7.2). Taking the deaths out of the mean leaves the value
-        of a win; the loss is what is held now (HP plus potions, valued the same way)
-        minus that. A potion the line drinks counts as its value in HP.
-        """
-        if best_stat is None:
-            return None
-        value, p_death = _finite(best_stat.value_mean), _finite(best_stat.p_death)
-        if value is None or p_death is None or p_death >= 1.0:
-            return None
-        player = live["player"]
-        held = sum(1 for slot in player["potions"] if slot["id"] is not None)
-        now = player["hp"] + self._settings.potion_value_hp * held
-        won = (value - p_death * _DEATH_VALUE_HP) / (1.0 - p_death)
-        return max(0.0, now - won)
-
-    def _warnings(self, position: _Position) -> list[str]:
-        """The snapshot builder's warnings with the engine's, then the coach's own."""
-        analysis = position.analysis
-        texts = [*position.live_warnings, *analysis.warnings]
-        if analysis.select_mapping_failures:
-            texts.append(
-                f"{analysis.select_mapping_failures} selection option(s) could not be matched "
-                "to the cards on screen and are missing from the advice."
-            )
-        if not self._versions.ok:  # advice with a version problem means the override is on
-            texts.append(
-                _sentence("The version check is overridden: " + "; ".join(self._versions.problems))
-            )
-        texts += self._fidelity_warnings()
-        return list(dict.fromkeys(_one_line(text) for text in texts))
-
-    def _fidelity_warnings(self) -> list[str]:
-        """The fidelity warnings of the last 10 graded moves (spec 6.3); older ones
-        are dropped for good."""
-        self._notes = [
-            (number, text)
-            for number, text in self._notes
-            if self._moves_graded - number < _FIDELITY_WINDOW_MOVES
-        ]
-        return [text for _, text in self._notes]
 
 
 # --- helpers -------------------------------------------------------------------------
@@ -983,84 +773,5 @@ def _move_from_entry(entry: dict, state: dict | None) -> Move:
     )
 
 
-def _plain_move(move: Move) -> Move:
-    """Only a Move's own fields (a MoveStat is a Move plus its statistics)."""
-    return Move(**{name: getattr(move, name) for name in _MOVE_FIELDS})
-
-
-def _move_dict(move: Move) -> dict:
-    return dataclasses.asdict(_plain_move(move))
-
-
-def _same_move(a: Move, b: Move) -> bool:
-    return all(getattr(a, name) == getattr(b, name) for name in _MOVE_IDENTITY_FIELDS)
-
-
-def _grade_dict(grade: grader.Grade) -> dict:
-    graded = dataclasses.asdict(grade)
-    graded["best"] = _move_dict(grade.best)
-    graded["played"] = _move_dict(grade.played)
-    return _json_safe(graded)
-
-
-def _ungraded_dict(played: Move, analysis: Analysis | None) -> dict:
-    """The Grade shape for a move with no analysis to grade it on, or one the analysis
-    does not have."""
-    return {
-        "label": "Ungraded",
-        "cost_lower_hp": None,
-        "cost_mean_hp": None,
-        "death_risk_delta_lower": None,
-        "best": _move_dict(analysis.best) if analysis is not None else None,
-        "played": _move_dict(played),
-        "unreliable": analysis is not None and not analysis.reliable,
-    }
-
-
-def _mismatch_sentence(move: Move, result: CheckResult, gap: Path) -> str:
-    findings = [
-        f"{m.get('field')} predicted {m.get('predicted')}, the game showed {m.get('actual')}"
-        for m in result.deterministic_mismatches
-    ] + [
-        f"{m.get('field')} came out {m.get('actual')}, which the simulator cannot produce"
-        for m in result.implausible
-    ]
-    more = f" (+{len(findings) - 1} more)" if len(findings) > 1 else ""
-    return _one_line(
-        f"Fidelity mismatch after {move.label}: {findings[0]}{more}; gap report {gap.name}."
-    )
-
-
-def _one_line(value: object) -> str:
-    """An exception or message as one line of text: no newline, never a stack trace."""
-    text = " ".join(str(value).split())
-    if not text and isinstance(value, BaseException):
-        return type(value).__name__
-    return text
-
-
-def _sentence(text: str) -> str:
-    text = _one_line(text)
-    return text if text.endswith((".", "!", "?", "…")) else f"{text}."
-
-
 def _int_or_none(value: object) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
-
-
-def _finite(value: object) -> float | None:
-    """A finite number, else None: a statistic with no data behind it (NaN, inf)."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    return value if math.isfinite(value) else None
-
-
-def _json_safe(value):
-    """`value` with every non-finite float replaced by None, so its JSON is strict."""
-    if isinstance(value, float):
-        return value if math.isfinite(value) else None
-    if isinstance(value, dict):
-        return {key: _json_safe(item) for key, item in value.items()}
-    if isinstance(value, list | tuple):
-        return [_json_safe(item) for item in value]
-    return value
