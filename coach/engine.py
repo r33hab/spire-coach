@@ -15,6 +15,12 @@ cycle end to end (the service itself handles one request at a time anyway),
 so ids from concurrent callers are always allocated and matched in order.
 On EOF, a crash, or a timeout, the client restarts the service once and
 retries the same request once; a second failure raises EngineUnavailable.
+
+The client owns the service's lifecycle. The service runs in a session of its
+own, so a Ctrl-C in the coach's terminal never reaches it; it stops when the
+client closes it, or on the EOF of its stdin when the coach dies without
+closing it. `close()` cuts off a request still waiting for its answer rather
+than waiting it out.
 """
 
 from __future__ import annotations
@@ -38,6 +44,7 @@ _LOG_MAX_BYTES = 1_000_000
 _LOG_BACKUP_COUNT = 3
 _READ_CHUNK_BYTES = 65536
 _STOP_WAIT_S = 1.0
+_CLOSE_POLL_S = 0.1  # how often a request waiting for its answer checks for close()
 
 
 # --- exceptions --------------------------------------------------------------
@@ -251,6 +258,7 @@ class EngineClient:
         self.on_restart = on_restart
         self._request_timeout_s = request_timeout_s
         self._lock = threading.Lock()
+        self._closing = threading.Event()  # set while close() waits for the lock
         self._proc: subprocess.Popen | None = None
         self._stderr_thread: threading.Thread | None = None
         self._stdout_buf = bytearray()
@@ -266,8 +274,11 @@ class EngineClient:
         with self._lock:
             self._ensure_started()
 
-    def health(self) -> dict:
-        return self._request("health", {}, self._request_timeout_s)
+    def health(self, *, timeout_s: float | None = None) -> dict:
+        """The service's health. `timeout_s` replaces the request timeout: the first
+        health check of a service that is still starting up can take much longer."""
+        timeout = self._request_timeout_s if timeout_s is None else timeout_s
+        return self._request("health", {}, timeout)
 
     def analyze(
         self,
@@ -305,20 +316,31 @@ class EngineClient:
         return _strategy_result_from_dict(result)
 
     def close(self) -> None:
-        with self._lock:
-            self._discard_proc()
-            if self._log_handler is not None:
-                self._logger.removeHandler(self._log_handler)
-                self._log_handler.close()
-                self._log_handler = None
+        """Stop the service. A request still waiting for its answer stops waiting at
+        once and raises EngineUnavailable, without a retry. A later request starts a
+        new service."""
+        self._closing.set()
+        try:
+            with self._lock:
+                self._discard_proc()
+                if self._log_handler is not None:
+                    self._logger.removeHandler(self._log_handler)
+                    self._log_handler.close()
+                    self._log_handler = None
+        finally:
+            self._closing.clear()
 
     # --- request/response --------------------------------------------------
 
     def _request(self, method: str, params: dict, timeout_s: float) -> dict:
         with self._lock:
+            if self._closing.is_set():
+                raise EngineUnavailable("the engine client is closing")
             try:
                 return self._request_once(method, params, timeout_s)
             except EngineUnavailable as exc:
+                if self._closing.is_set():
+                    raise  # closed under way: no restart, no retry
                 self._logger.warning("restarting the engine service after: %s", exc)
                 self._notify_restart()
                 self._restart()
@@ -365,12 +387,14 @@ class EngineClient:
         deadline = time.monotonic() + timeout_s
         fd = self._proc.stdout.fileno()
         while b"\n" not in self._stdout_buf:
+            if self._closing.is_set():
+                raise EngineUnavailable("the engine client was closed while it waited")
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise EngineUnavailable(
                     f"the engine service did not respond within {timeout_s:.1f}s"
                 )
-            ready, _, _ = select.select([fd], [], [], remaining)
+            ready, _, _ = select.select([fd], [], [], min(remaining, _CLOSE_POLL_S))
             if not ready:
                 continue
             try:
@@ -430,6 +454,7 @@ class EngineClient:
                 stderr=subprocess.PIPE,
                 cwd=self._cwd,
                 env=self._env,
+                start_new_session=True,  # out of reach of the terminal's Ctrl-C
             )
         except OSError as exc:
             raise EngineUnavailable(f"could not start the engine service: {exc}") from exc

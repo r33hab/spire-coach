@@ -39,6 +39,9 @@ every request so a test can steer a running instance, or steer what a
   {"health": {...}}
       health answers with this object instead of its canned result: an older
       service, say, that reports no native_api_version.
+  {"health_delay_s": 1.5}
+      health answers only after this many seconds, like the real service on a
+      cold start (uv, imports, spawning its search workers).
 
 A missing or unreadable control file means no special behavior: every
 request gets its canned result. Every request also logs one line to
@@ -164,6 +167,9 @@ def main() -> None:
         if control.get("hang"):
             time.sleep(3600)
             continue
+
+        if method == "health" and control.get("health_delay_s"):
+            time.sleep(control["health_delay_s"])
 
         ok_false = control.get("ok_false")
         if ok_false is not None:

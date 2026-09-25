@@ -1,8 +1,10 @@
 import dataclasses
 import json
 import os
+import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -96,7 +98,7 @@ def test_a_custom_command_inherits_the_coachs_cwd_and_env():
     assert client._env is None
 
 
-def test_the_service_is_spawned_with_the_launch_cwd_and_env(monkeypatch):
+def test_the_service_is_spawned_with_the_launch_cwd_and_env_in_a_session_of_its_own(monkeypatch):
     spawned = {}
 
     def recording_popen(cmd, **kwargs):
@@ -112,6 +114,67 @@ def test_the_service_is_spawned_with_the_launch_cwd_and_env(monkeypatch):
     assert spawned["cmd"] == client._cmd
     assert spawned["cwd"] == client._cwd
     assert spawned["env"] == client._env
+    assert spawned["start_new_session"] is True
+
+
+def test_a_terminals_ctrl_c_never_reaches_the_service(tmp_path):
+    # Ctrl-C goes to the terminal's foreground process group. The service leads a
+    # session and a group of its own, so only its client stops it.
+    client = make_client(tmp_path)
+    try:
+        client.health()
+        pid = client._proc.pid
+
+        assert os.getsid(pid) == pid
+        assert os.getpgid(pid) == pid != os.getpgid(0)
+    finally:
+        client.close()
+
+
+_CLIENT_HOLDER = """
+import sys, time
+from coach.engine import EngineClient
+client = EngineClient([sys.executable, sys.argv[1], sys.argv[2]])
+client.health()
+print(client._proc.pid, flush=True)
+time.sleep(60)
+"""
+
+
+def gone(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    return False
+
+
+def test_a_service_whose_client_was_killed_exits_on_stdin_eof(tmp_path):
+    # Its own session means the terminal no longer stops it: when the coach dies without
+    # closing anything (SIGKILL), the service must still end, on the EOF of its stdin.
+    control = tmp_path / "control.json"
+    holder = subprocess.Popen(
+        [sys.executable, "-c", _CLIENT_HOLDER, str(FAKE_SERVICE), str(control)],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    service = None
+    try:
+        service = int(holder.stdout.readline())
+        holder.kill()  # the client never gets to close the service
+        holder.wait(timeout=10)
+
+        deadline = time.monotonic() + 10
+        while not gone(service) and time.monotonic() < deadline:
+            time.sleep(0.02)
+
+        assert gone(service), "the service outlived its killed client"
+    finally:
+        holder.kill()
+        holder.wait(timeout=10)
+        holder.stdout.close()
+        if service is not None and not gone(service):
+            os.kill(service, 9)
 
 
 # --- dataclasses are frozen and mirror the protocol shapes -------------------
@@ -604,6 +667,64 @@ def test_close_is_idempotent(tmp_path):
     client.health()
     client.close()
     client.close()
+
+
+def test_close_cuts_off_a_request_still_waiting_and_starts_no_new_service(tmp_path):
+    # The coach closes the engine last when it stops. A request still waiting for its
+    # answer (a health check can wait long for a slow start) must not hold that up.
+    log_path = tmp_path / "requests.jsonl"
+    client = make_client(
+        tmp_path, control={"hang": True, "log_requests_to": str(log_path)}, request_timeout_s=60
+    )
+    outcome = {}
+
+    def ask():
+        try:
+            client.health()
+        except EngineUnavailable as exc:
+            outcome["error"] = exc
+
+    waiting = threading.Thread(target=ask)
+    waiting.start()
+    deadline = time.monotonic() + 10
+    while not read_jsonl(log_path) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    pid = client._proc.pid
+
+    started = time.monotonic()
+    client.close()
+
+    assert time.monotonic() - started < 5  # not the 60 s the request could wait
+    waiting.join(timeout=5)
+    assert not waiting.is_alive()
+    assert "error" in outcome
+    assert len(read_jsonl(log_path)) == 1  # it was not retried on a new service
+    assert client._proc is None
+    assert gone(pid)
+
+
+def test_a_client_that_was_closed_can_start_the_service_again(tmp_path):
+    client = make_client(tmp_path)
+    try:
+        client.health()
+        client.close()
+
+        assert client.health()["native_api_version"] == 1
+    finally:
+        client.close()
+
+
+def test_health_may_wait_longer_than_the_request_timeout_for_a_slow_start(tmp_path):
+    # A cold start of the real service (uv, imports, the search workers) can take longer
+    # than an ordinary request may: the first health check gets a timeout of its own.
+    client = make_client(tmp_path, control={"health_delay_s": 1.0}, request_timeout_s=0.3)
+    try:
+        with pytest.raises(EngineUnavailable, match="did not respond within 0.3s"):
+            client.health()
+
+        assert client.health(timeout_s=10)["native_api_version"] == 1
+    finally:
+        client.close()
 
 
 # --- stderr goes to the rotating log file, never to stdout ---------------------
