@@ -369,7 +369,11 @@ class EngineClient:
         self._log_handler = handler
 
     def _ensure_started(self) -> None:
-        if self._proc is None or self._proc.poll() is not None:
+        if self._proc is not None and self._proc.poll() is not None:
+            # It died between requests: reap it, close its pipes and join its
+            # stderr drain thread before a fresh one replaces it.
+            self._discard_proc()
+        if self._proc is None:
             self._spawn()
 
     def _spawn(self) -> None:

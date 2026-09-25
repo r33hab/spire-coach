@@ -292,6 +292,29 @@ def test_a_crash_mid_request_is_retried_against_a_fresh_process(tmp_path):
         client.close()
 
 
+def test_a_process_that_died_between_requests_is_discarded_before_the_respawn(tmp_path):
+    client = make_client(tmp_path)
+    try:
+        client.start()
+        dead = client._proc
+        dead_drain = client._stderr_thread
+        dead.kill()
+        dead.wait()
+
+        result = client.health()  # finds the dead process and must respawn
+
+        assert result["service_version"] == "test-1"
+        assert client._proc is not dead
+        # The dead process was discarded properly, not just dropped: its pipes are
+        # closed and its stderr drain thread has been joined.
+        assert dead.stdin.closed
+        assert dead.stdout.closed
+        assert dead.stderr.closed
+        assert not dead_drain.is_alive()
+    finally:
+        client.close()
+
+
 def test_two_crashes_in_a_row_raise_engine_unavailable(tmp_path):
     # crash_always is never cleared, so both the first attempt and the
     # post-restart retry hit a process that crashes immediately.
@@ -309,7 +332,15 @@ def test_two_crashes_in_a_row_raise_engine_unavailable(tmp_path):
 # --- a hang times out ----------------------------------------------------------
 
 
-def test_a_hang_times_out_and_raises_engine_unavailable(tmp_path):
+def test_a_hang_times_out_and_raises_engine_unavailable(tmp_path, monkeypatch):
+    spawned_pids = []
+    original_spawn = EngineClient._spawn
+
+    def recording_spawn(self):
+        original_spawn(self)
+        spawned_pids.append(self._proc.pid)
+
+    monkeypatch.setattr(EngineClient, "_spawn", recording_spawn)
     client = make_client(tmp_path, control={"hang": True}, request_timeout_s=0.2)
     try:
         with pytest.raises(EngineUnavailable):
@@ -318,6 +349,12 @@ def test_a_hang_times_out_and_raises_engine_unavailable(tmp_path):
         assert client._proc is None
     finally:
         client.close()
+    # Both hung processes (the first attempt's and the restarted retry's) were
+    # killed and reaped: neither pid exists any more.
+    assert len(spawned_pids) == 2
+    for pid in spawned_pids:
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
 
 
 def test_analyze_uses_the_r1_timeout_2x_budget_plus_5s(tmp_path, monkeypatch):
