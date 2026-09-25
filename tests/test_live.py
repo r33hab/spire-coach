@@ -1116,28 +1116,63 @@ def test_the_version_override_allows_advice_anyway_with_a_warning(make_session):
     assert any("overridden" in w and "schema_version 5" in w for w in warnings)
 
 
-def test_an_engine_crash_shows_engine_restarting_then_advice_from_the_restarted_service(
-    make_session,
-):
-    failures = [EngineUnavailable("engine service unavailable after a restart: it exited")]
+def test_the_clients_own_restart_shows_engine_restarting_then_advice(make_session):
+    # Ruling (Review Focus 2): the session hears the client restart the service
+    # through its on_restart, while the position on screen waits for its analysis.
     bridge = FakeBridge()
-    engine = FakeEngine(lambda live: failures.pop() if failures else standard_analysis(live))
+    engine = FakeEngine(standard_analysis)
     session, published = make_session(bridge, engine)
+    assert callable(engine.on_restart)  # the session installed itself on the engine
 
+    def respond(live):
+        if len(engine.analyze_calls) == 1:
+            engine.on_restart()  # the service crashed: the client restarts it and retries
+        return standard_analysis(live)
+
+    engine.respond = respond
     settle(session, bridge, combat(seq=12))
     step_until(session, advising(published))
 
     statuses = [state.status for state in published]
     assert statuses.index("thinking") < statuses.index("engine_restarting") < len(statuses) - 1
     restarting = published[statuses.index("engine_restarting")]
-    assert "restarting" in restarting.status_text
-    assert len(engine.analyze_calls) == 2  # the position was analyzed again on a fresh service
+    assert restarting.status_text == "The engine service stopped; restarting it."
+    assert len(engine.analyze_calls) == 1  # the retry is the client's, not a second request
+
+    # The restart is over once its request came back: the next position just thinks.
+    since = len(published)
+    act(session, bridge, play(13, "c1", "JAW_WORM_0"), combat(seq=13, hand=P1_HAND))
+    step_until(session, advising(published, "c2"))
+    later = [state.status for state in published[since:]]
+    assert "thinking" in later and "engine_restarting" not in later
+
+
+def test_a_restart_during_a_background_check_leaves_the_advice_on_screen(make_session):
+    bridge = FakeBridge()
+    engine = FakeEngine(standard_analysis)
+
+    def check(pre, move, post):
+        engine.on_restart()  # the client restarts the service mid-check
+        return CLEAN_CHECK
+
+    engine.check_respond = check
+    session, published = make_session(bridge, engine)
+    settle(session, bridge, combat(seq=12))
+    step_until(session, advising(published))
+    act(session, bridge, play(13, "c1", "JAW_WORM_0"), combat(seq=13, hand=P1_HAND))
+    step_until(session, lambda: engine.check_calls and advising(published, "c2")())
+    since_advice = len(published) - 1
+    for _ in range(5):
+        session.step()
+
+    assert all(state.status == "advice" for state in published[since_advice:])
 
 
 def test_an_engine_that_stays_down_turns_advice_off_and_the_next_position_tries_again(
     make_session,
 ):
-    failures = [EngineUnavailable("it exited"), EngineUnavailable("it exited again")]
+    # EngineUnavailable means the client's own restart and retry failed too.
+    failures = [EngineUnavailable("engine service unavailable after a restart: it exited")]
     bridge = FakeBridge()
     engine = FakeEngine(lambda live: failures.pop() if failures else standard_analysis(live))
     session, published = make_session(bridge, engine)
@@ -1146,9 +1181,9 @@ def test_an_engine_that_stays_down_turns_advice_off_and_the_next_position_tries_
     step_until(session, lambda: latest(published).status == "advice_off")
     assert "engine service is unavailable" in latest(published).status_text
 
-    settle(session, bridge, combat(seq=13, hand=P1_HAND))
+    act(session, bridge, play(13, "c1", "JAW_WORM_0"), combat(seq=13, hand=P1_HAND))
     step_until(session, advising(published, "c2"))
-    assert len(engine.analyze_calls) == 3
+    assert len(engine.analyze_calls) == 2  # no extra retry: the next position tries again
 
 
 def test_an_engine_error_turns_advice_off_for_that_position_with_the_engines_message(

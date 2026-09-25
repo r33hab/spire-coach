@@ -82,9 +82,6 @@ _COMBAT_DECISIONS = frozenset({DecisionKind.COMBAT, DecisionKind.COMBAT_SELECT})
 # made outside combat (selling a potion to the merchant, say) and is only logged.
 _GRADABLE_ENTRY_KINDS = frozenset({"play_card", "use_potion", "end_turn"})
 _ENTRY_MOVE_KINDS = {"play_card": "card", "use_potion": "potion", "end_turn": "end_turn"}
-# A position's analysis is still on its way: the moves made from it wait for it.
-_IN_FLIGHT = frozenset({"pending", "restarting"})
-
 _SEEN_MAX = 64  # settled positions kept for matching moves to where they were made
 _SOURCES_MAX = 256  # recent action-log seqs whose source (human/api) is remembered
 _FIDELITY_WINDOW_MOVES = 10  # spec 6.3: a mismatch keeps its warning up for 10 moves
@@ -126,10 +123,9 @@ class _Position:
     """One settled position and what the coach made of it.
 
     `status`: "none" (not a combat decision), "new", "blocked" (versions don't match),
-    "unreadable" (no live snapshot), "pending" (analysis queued or running),
-    "restarting" (analysis retried after the engine went down), "skipped" (its turn
-    came when nothing needed it: it is queued again if a move from it turns up),
-    "done", "failed".
+    "unreadable" (no live snapshot), "pending" (analysis queued or running: the moves
+    made from it wait for it), "skipped" (its turn came when nothing needed it: it is
+    queued again if a move from it turns up), "done", "failed".
     """
 
     fingerprint: str
@@ -141,7 +137,6 @@ class _Position:
     live_warnings: list[str] = field(default_factory=list)
     analysis: Analysis | None = None
     error: str | None = None
-    retried: bool = False
     revealed: bool = False  # a move from it was graded: quiz mode may show its advice
     waiting_moves: int = 0  # queued grades that need its analysis
 
@@ -178,6 +173,7 @@ class _PendingCheck:
 
 
 _REFRESH = object()  # a message asking the session thread to republish
+_ENGINE_RESTARTING = object()  # a message: the engine client is restarting the service
 _GONE = object()  # a position that fell out of the timeline
 
 
@@ -186,7 +182,11 @@ _GONE = object()  # a position that fell out of the timeline
 
 class CoachSession:
     """The live loop: bridge -> Stabilizer -> snapshot -> engine -> panel, and the
-    action log -> grade -> fidelity check."""
+    action log -> grade -> fidelity check.
+
+    It installs itself as the engine's `on_restart`, so the panel says "engine
+    restarting" while the client restarts the service (Review Focus 2).
+    """
 
     def __init__(
         self,
@@ -209,6 +209,9 @@ class CoachSession:
         self._worker = Worker(
             lambda job, outcome: self._results.put((job, outcome)), name="coach-engine"
         )
+        self._engine_restarting = False
+        # Called by the client on the engine thread, with its lock held: only note it.
+        engine.on_restart = lambda: self._results.put(_ENGINE_RESTARTING)
         self._stabilizer = Stabilizer()
 
         self._mode = settings.mode
@@ -513,14 +516,9 @@ class CoachSession:
         else:
             message = one_line(outcome)
             record["error"] = message
-            if isinstance(outcome, EngineUnavailable) and current and not position.retried:
-                # The client already restarted the service once; start it afresh and
-                # try this position one more time while the panel says so.
-                position.retried = True
-                position.status = "restarting"
-                position.error = message
-                self._submit_analysis(position)
-            elif isinstance(outcome, EngineUnavailable):
+            if isinstance(outcome, EngineUnavailable):
+                # The client already restarted the service and retried; the next
+                # position tries again on a fresh one.
                 position.status = "failed"
                 position.error = f"the engine service is unavailable ({message})"
             elif isinstance(outcome, EngineError):
@@ -563,7 +561,7 @@ class CoachSession:
                 # Its turn came before this move turned up: analyze it after all.
                 position.status = "pending"
                 self._submit_analysis(position, urgent=False)
-            if position is not None and position.status in _IN_FLIGHT:
+            if position is not None and position.status == "pending":
                 break  # the moves after it wait too, so grades reach the panel in order
             self._pending_grades.popleft()
             if position is not None:
@@ -740,8 +738,13 @@ class CoachSession:
             self._apply(message)
 
     def _apply(self, message: object) -> None:
-        """Apply one worker result, and show what it changed before the next one."""
-        if message is not _REFRESH:
+        """Apply one message from the engine thread, and show what it changed before
+        the next one."""
+        if message is _ENGINE_RESTARTING:
+            self._engine_restarting = True
+        elif message is not _REFRESH:
+            # The request that restarted the service has come back, one way or another.
+            self._engine_restarting = False
             job, outcome = message
             kind, *context = job.context
             if kind == "analysis":
@@ -771,6 +774,7 @@ class CoachSession:
             last_grade=self._last_grade,
             run=self._run,
             fidelity_warnings=self._fidelity_warnings(),
+            engine_restarting=self._engine_restarting,
             z=self._settings.thresholds.z,
             potion_value_hp=self._settings.potion_value_hp,
         )

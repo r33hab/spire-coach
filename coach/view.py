@@ -69,11 +69,13 @@ def compose(
     last_grade: dict | None,
     run: dict,
     fidelity_warnings: list[str],
+    engine_restarting: bool,
     z: float,
     potion_value_hp: float,
 ) -> CoachState:
     """The panel's state for this situation. `position` is the combat decision on
-    screen, or None when there is none."""
+    screen, or None when there is none; `engine_restarting` says the engine client is
+    restarting the service (its on_restart fired and the request has not come back)."""
 
     def shown(status: str, text: str, recommendation: dict | None = None) -> CoachState:
         return CoachState(
@@ -112,12 +114,9 @@ def compose(
         )
     if position.status == "failed":
         return shown("advice_off", sentence(f"Advice is off for this position: {position.error}"))
-    if position.status == "restarting":
-        return shown(
-            "engine_restarting",
-            sentence(f"The engine service stopped ({position.error}); restarting it"),
-        )
     if position.status != "done":
+        if engine_restarting:  # the position on screen waits on the restarted service
+            return shown("engine_restarting", "The engine service stopped; restarting it.")
         return shown("thinking", "Analyzing this position…")
     recommendation = _recommendation(
         position,

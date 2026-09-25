@@ -79,6 +79,7 @@ def shown(position, **overrides) -> CoachState:
         last_grade=None,
         run={"act": 1, "floor": 2},
         fidelity_warnings=[],
+        engine_restarting=False,
         z=1.645,
         potion_value_hp=10.0,
     )
@@ -131,6 +132,14 @@ def test_expected_hp_loss_takes_deaths_and_held_potions_out_of_the_engines_value
     loss = shown(position).recommendation["expected_hp_loss"]
 
     assert loss == (pytest.approx(expected) if expected is not None else None)
+
+
+def test_engine_restarting_shows_only_while_the_position_on_screen_waits():
+    waiting = position_with(stat())
+    waiting.status = "pending"
+    assert shown(waiting, engine_restarting=True).status == "engine_restarting"
+    assert shown(waiting).status == "thinking"
+    assert shown(position_with(stat()), engine_restarting=True).status == "advice"
 
 
 def test_texts_are_one_line_sentences():
