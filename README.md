@@ -94,7 +94,7 @@ with the game closed) and restart the game.
 | `--workers N` | 4 | Search worker processes the engine service runs. |
 | `--budget S` | 1.5 | Seconds of search per position. |
 | `--port P` | 15530 | The panel's port on 127.0.0.1. |
-| `--no-window` | off | No floating window: open the panel in a browser tab instead. |
+| `--no-window` | off | No floating window: the terminal prints the panel's URL; open it in a browser tab. |
 | `--mode show\|quiz` | show | Show the best move at once, or quiz: hide it until you have moved. |
 
 The coach starts the engine service and checks its health, then opens the panel in a
@@ -117,7 +117,10 @@ it finishes, the coach starts on the new position. The unfinished analysis still
 the move you made from it.
 
 To stop, close the panel window or press Ctrl-C in the terminal. Either one stops
-everything, the engine service included.
+everything, the engine service included, and so does a plain `kill` or closing the
+terminal. The coach turns a request to quit into closing its window, so that it can
+stop in order. A macOS logout or restart asks it to quit too, so the first attempt
+is cancelled once; the coach then closes, and a second attempt goes through.
 
 ### When advice is off
 
@@ -126,13 +129,19 @@ when:
 
 - the game is not v0.107.1;
 - the mod is not the 0.4 build with payload schema 4;
-- the engine service failed its health check when the coach started, or did not report
-  the native API version it runs.
+- the engine service failed its health check, did not report the native API version
+  it runs, or was built for another game version.
 
 The **Show advice anyway** button under the status line (the version override) shows
 advice regardless, with a warning that names the problem. **Turn off override** turns
 it back off. Advice can also be off for a single position that the coach could not read
 or the engine could not analyze; the status line then gives the reason.
+
+When the engine is what keeps advice off, the coach checks it again every 30 s, and
+whenever the engine service restarts. Advice comes on by itself once the engine is
+healthy, without a restart of the coach. Each check waits up to 90 s for the service
+to start, since a cold start (uv, imports, the search workers) can be slow;
+`SPIRE_COACH_ENGINE_START_S` changes that.
 
 ## What the grades mean
 
@@ -142,7 +151,8 @@ potion still held worth 10 HP and a death counted as −100. The engine plays bo
 out many times on the same random outcomes, so the difference in value comes with an
 error bar. The grade uses the low end of that difference's 90% confidence range
 (difference − 1.645 × standard error), so a few unlucky samples never produce a harsh
-grade.
+grade. The death-risk rule for a Blunder uses the same kind of low end: the increase in
+the risk of dying, minus 1.645 × its standard error.
 
 | Grade | HP given up (the low end) |
 |---|---|
@@ -150,11 +160,12 @@ grade.
 | Good | under 2 HP |
 | Inaccuracy | 2 to 5 HP |
 | Mistake | 5 to 10 HP |
-| Blunder | 10 HP or more, or a risk of dying at least 10 percentage points higher |
+| Blunder | 10 HP or more, or when the low end of the increase in the risk of dying is 10 percentage points or more |
 
 - **Ungraded**: the coach could not grade the move. The engine had fewer than 20 paired
-  samples for it, or there was no analysis of the position you moved from (you moved
-  before that position settled on screen, or its analysis failed).
+  samples for it or lacked one of the statistics a grade needs, or there was no
+  analysis of the position you moved from (you moved before that position settled on
+  screen, or its analysis failed).
 - **(unreliable)** after a grade: the position had content the simulator does not model
   fully. Take the grade as a hint.
 
@@ -201,7 +212,8 @@ stays here.
 Settings come from the environment: `SPIRE_COACH_BASE_URL` (the mod's address, default
 `http://127.0.0.1:15526`), `SPIRE_COACH_TOKEN` (by default read from the mod's
 `STS2_MCP.conf`), `SPIRE_COACH_POLL_S` (how often the game is read, default 0.2 s),
-`SPIRE_COACH_DATA_DIR` and `SPIRE_COACH_MODS_DIR`.
+`SPIRE_COACH_ENGINE_START_S` (how long a health check waits for the engine service
+to start, default 90 s), `SPIRE_COACH_DATA_DIR` and `SPIRE_COACH_MODS_DIR`.
 
 ## Development
 
