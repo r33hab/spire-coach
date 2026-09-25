@@ -27,6 +27,10 @@ from coach.live import CoachSession, CoachSettings
 
 FIXTURES = Path(__file__).parent / "fixtures" / "mod"
 NOT_REACHABLE = "could not reach the mod: is the game running with the mod loaded?"
+# How long a test waits on the session's threads before it gives up. Generous on
+# purpose: it only ever runs out on a broken test, while a loaded machine can starve a
+# thread for seconds (5 s waits tripped at a load average of about 11).
+UNDER_LOAD_S = 60.0
 
 
 def load(name):
@@ -260,10 +264,11 @@ class FakeEngine:
         self.analyze_calls = []
         self.check_calls = []
         self._gate = None
+        self.holding = threading.Event()  # set once an analysis is being held
 
     def hold(self, predicate):
         """Hold every analysis whose live snapshot matches `predicate` until the
-        returned event is set."""
+        returned event is set. `holding` is set once one has started and is held."""
         release = threading.Event()
         self._gate = (predicate, release)
         return release
@@ -271,7 +276,8 @@ class FakeEngine:
     def analyze(self, live, **kwargs):
         self.analyze_calls.append((live, kwargs))
         if self._gate is not None and self._gate[0](live):
-            assert self._gate[1].wait(5), "the test never released the held analysis"
+            self.holding.set()
+            assert self._gate[1].wait(UNDER_LOAD_S), "the test never released the held analysis"
         return self._answer(self.respond(live))
 
     def check(self, pre, move, post):
@@ -434,7 +440,7 @@ def standard_analysis(live):
 def make_session(tmp_path):
     sessions = []
 
-    def make(bridge, engine, settings=None):
+    def make(bridge, engine, settings=None, **options):
         published = []
         session = CoachSession(
             bridge,
@@ -442,6 +448,7 @@ def make_session(tmp_path):
             publish=published.append,
             data_dir=tmp_path,
             settings=settings or CoachSettings(),
+            **options,
         )
         sessions.append(session)
         return session, published
@@ -473,6 +480,11 @@ def step_until(session, condition, timeout=5.0):
         assert time.monotonic() < deadline, "timed out waiting for the session"
         session.step()
         time.sleep(0.002)
+
+
+def wait_for(event, what):
+    if not event.wait(UNDER_LOAD_S):
+        pytest.fail(f"timed out waiting for {what}")
 
 
 def latest(published):
@@ -715,6 +727,9 @@ def test_a_move_made_before_its_analysis_finished_is_graded_on_that_analysis(
 
     p0 = combat(seq=12)
     settle(session, bridge, p0)
+    # The player acts while P0's analysis runs. Should the engine thread not have taken
+    # it up yet (a loaded machine can starve it), P1, queued ahead of it, would run first.
+    wait_for(engine.holding, "P0's analysis to start")
     assert latest(published).status == "thinking"
 
     bridge.entries.append(play(13, "c1", "JAW_WORM_0"))
@@ -727,7 +742,7 @@ def test_a_move_made_before_its_analysis_finished_is_graded_on_that_analysis(
     p1_since = len(published) - 1
 
     release_p0.set()
-    step_until(session, advising(published, "c2"))
+    step_until(session, advising(published, "c2"), timeout=UNDER_LOAD_S)
 
     # P0's result came in after P1 was on screen: it never reached the panel...
     for state in published[p1_since:]:
@@ -748,12 +763,13 @@ def test_the_newest_position_is_analyzed_next_ahead_of_older_queued_ones(make_se
     session, published = make_session(bridge, engine)
 
     settle(session, bridge, combat(seq=12))
+    wait_for(engine.holding, "P0's analysis to start")
     act(session, bridge, play(13, "c1", "JAW_WORM_0"), combat(seq=13, hand=P1_HAND))
     act(session, bridge, play(14, "c2"), combat(seq=14, hand=P2_HAND))
     bridge.entries.append(end_turn_entry(15))  # made from P2
     session.step()
     release_p0.set()
-    step_until(session, lambda: len(grade_history(published)) == 3)
+    step_until(session, lambda: len(grade_history(published)) == 3, timeout=UNDER_LOAD_S)
 
     # P0 was already running; P2 (on screen) went next, ahead of P1, which only a
     # grade still needed.
@@ -799,13 +815,14 @@ def test_an_analysis_nobody_needs_any_more_is_skipped(make_session, tmp_path):
     release_p0 = engine.hold(lambda live: "c1" in hand_uids(live))
     session, published = make_session(bridge, engine)
     settle(session, bridge, combat(seq=12))
+    wait_for(engine.holding, "P0's analysis to start")
     act(session, bridge, play(13, "c1", "JAW_WORM_0"), combat(seq=13, hand=P1_HAND))
     act(session, bridge, play(14, "c2", source="api"), combat(seq=14, hand=P2_HAND))
     act(session, bridge, play(15, "c4"), combat(seq=15, hand=("c3",)))
 
     release_p0.set()
-    step_until(session, lambda: len(grade_history(published)) == 2)
-    step_until(session, advising(published))
+    step_until(session, lambda: len(grade_history(published)) == 2, timeout=UNDER_LOAD_S)
+    step_until(session, advising(published), timeout=UNDER_LOAD_S)
 
     assert [hand_uids(live) for live, _ in engine.analyze_calls] == [
         ["c1", "c2", "c3", "c4"],
@@ -825,15 +842,20 @@ def test_a_skipped_analysis_a_late_move_turns_out_to_need_is_run_after_all(make_
     release_p0 = engine.hold(lambda live: "c1" in hand_uids(live))
     session, published = make_session(bridge, engine)
     settle(session, bridge, combat(seq=12))
+    wait_for(engine.holding, "P0's analysis to start")
     act(session, bridge, play(13, "c1", "JAW_WORM_0"), combat(seq=13, hand=P1_HAND))
     # Whirlwind is played from P1, but the log only hands it over later.
     bridge.visible_up_to = 13
     act(session, bridge, play(14, "c2"), combat(seq=14, hand=P2_HAND))
 
     release_p0.set()
-    step_until(session, lambda: any(r.get("skipped") for r in run_log(tmp_path, "analysis")))
+    step_until(
+        session,
+        lambda: any(r.get("skipped") for r in run_log(tmp_path, "analysis")),
+        timeout=UNDER_LOAD_S,
+    )
     bridge.visible_up_to = None
-    step_until(session, lambda: len(grade_history(published)) == 2)
+    step_until(session, lambda: len(grade_history(published)) == 2, timeout=UNDER_LOAD_S)
 
     assert [(g["played"]["card_uid"], g["label"]) for g in grade_history(published)] == [
         ("c1", "Inaccuracy"),
@@ -1224,6 +1246,43 @@ def test_the_version_override_allows_advice_anyway_with_a_warning(make_session):
     assert any("overridden" in w and "schema_version 5" in w for w in warnings)
 
 
+def test_an_engine_that_failed_its_startup_health_check_counts_as_a_version_problem(
+    make_session,
+):
+    # The coach command health-checks the engine service at startup: advice needs it
+    # healthy just as it needs the right game and mod, and the same override applies.
+    settings = CoachSettings()
+    bridge = FakeBridge()
+    engine = FakeEngine(standard_analysis)
+    session, published = make_session(
+        bridge,
+        engine,
+        settings,
+        engine_problems=["the engine service did not report its native API version"],
+    )
+
+    settle(session, bridge, combat(seq=12))
+    session.step()
+
+    first = published[0]  # before any position settled: the versions say so already
+    assert first.versions.problems == ["the engine service did not report its native API version"]
+    advice_off = latest(published)
+    assert advice_off.status == "advice_off"
+    assert advice_off.status_text == (
+        "Advice is off: the engine service did not report its native API version. "
+        "Turn on the version override in the settings to see advice anyway."
+    )
+    assert advice_off.versions.ok is False
+    assert engine.analyze_calls == []
+
+    settings.override_versions = True  # the panel's "Show advice anyway"
+    step_until(session, advising(published))
+
+    assert (
+        "The version check is overridden: the engine service did not report its native API version."
+    ) in latest(published).recommendation["warnings"]
+
+
 def test_the_clients_own_restart_shows_engine_restarting_then_advice(make_session):
     # Ruling (Review Focus 2): the session hears the client restart the service
     # through its on_restart, while the position on screen waits for its analysis.
@@ -1477,9 +1536,14 @@ def test_a_hand_selection_shows_the_snapshot_builders_warnings_with_the_engines(
     session, published = make_session(bridge, engine)
     p0 = combat(seq=12)
     settle(session, bridge, p0)
+    # The fight's own analysis first: were the selection already on screen when its turn
+    # came (a loaded machine can be that slow), nothing would need it and it is skipped.
+    step_until(session, advising(published), timeout=UNDER_LOAD_S)
     settle(session, bridge, hand_select(p0, seq=12))
     step_until(
-        session, lambda: latest(published).status == "advice" and len(engine.analyze_calls) == 2
+        session,
+        lambda: latest(published).status == "advice" and len(engine.analyze_calls) == 2,
+        timeout=UNDER_LOAD_S,
     )
 
     analyzed = engine.analyze_calls[1][0]

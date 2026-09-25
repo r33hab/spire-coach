@@ -36,6 +36,9 @@ every request so a test can steer a running instance, or steer what a
   {"null_stats": true}
       analyze's move statistics carry null for value_mean and p_death, as the
       real service sends a statistic with no data behind it (NaN, inf).
+  {"health": {...}}
+      health answers with this object instead of its canned result: an older
+      service, say, that reports no native_api_version.
 
 A missing or unreadable control file means no special behavior: every
 request gets its canned result. Every request also logs one line to
@@ -90,6 +93,8 @@ def _canned_result(method: str, control: dict) -> dict | None:
     }
     if control.get("null_stats"):
         move_stat.update(value_mean=None, p_death=None)
+    if method == "health" and "health" in control:
+        return control["health"]
     results = {
         "health": {
             "service_version": "test-1",

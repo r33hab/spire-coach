@@ -12,6 +12,11 @@
   A valid update goes to the coach whole; an invalid one is refused whole, with one
   sentence saying why.
 
+Every HTTP request must be addressed to the panel itself: its Host header must be
+127.0.0.1:<port> or localhost:<port>, the port being the one the server listens on.
+Anything else is refused (400), which stops a DNS-rebinding page from reading the state
+or changing the settings.
+
 `Broadcaster.publish` is the session's publish callback: it may be called from any
 thread and fans each state out to every connected panel. The state provider must
 return the newest state published, so the caller keeps each state before handing it
@@ -35,6 +40,8 @@ import uvicorn
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.datastructures import Headers
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from coach.live import MODES
 from coach.view import CoachState, one_line, sentence
@@ -44,6 +51,9 @@ DEFAULT_PORT = 15530
 PANEL_DIR = Path(__file__).resolve().parent.parent / "panel"
 
 _LOOPBACK_HOSTS = ("127.0.0.1", "localhost")  # the names the panel's page is opened by
+_NOT_THE_PANEL = (
+    "The coach only answers requests addressed to 127.0.0.1 or localhost on its own port."
+)
 
 _SETTINGS = ("mode", "override_versions")
 _INBOX_MAX = 64  # states a slow panel may fall behind by before it skips the oldest
@@ -126,6 +136,7 @@ def create_app(
     broadcaster = broadcaster if broadcaster is not None else Broadcaster()
     app = FastAPI(title="Spire Coach", docs_url=None, redoc_url=None, openapi_url=None)
     app.state.broadcaster = broadcaster
+    app.add_middleware(_OnlyAddressedToThePanel)
 
     @app.get("/")
     async def panel() -> FileResponse:
@@ -195,6 +206,37 @@ def create_server(app: FastAPI, *, port: int = DEFAULT_PORT) -> uvicorn.Server:
 # --- helpers -------------------------------------------------------------------------
 
 
+class _OnlyAddressedToThePanel:
+    """Refuses (400) every HTTP request whose Host header is not the panel's own.
+
+    The same-origin rule keeps a page on another site from reading the coach's answers,
+    until DNS rebinding points that site's own name at 127.0.0.1: the browser then takes
+    the coach for that site. It still names the site in the Host header, though, and
+    that is refused here. The live socket is checked by its Origin instead
+    (`_from_the_panel`).
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self._app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http" and Headers(scope=scope).get("host") not in _panel_hosts(scope):
+            await _refused(400, _NOT_THE_PANEL)(scope, receive, send)
+            return
+        await self._app(scope, receive, send)
+
+
+def _panel_hosts(scope: Scope) -> set[str]:
+    """The host[:port] names the panel's page is opened by: 127.0.0.1 and localhost on
+    the port the server listens on, which a browser leaves out when it is 80. Empty
+    when there is no port to compare with."""
+    server = scope.get("server")
+    if not server:
+        return set()
+    port = "" if server[1] == 80 else f":{server[1]}"
+    return {f"{host}{port}" for host in _LOOPBACK_HOSTS}
+
+
 def _from_the_panel(websocket: WebSocket) -> bool:
     """Whether a socket may open: a page in a browser must be the panel itself.
 
@@ -208,11 +250,7 @@ def _from_the_panel(websocket: WebSocket) -> bool:
     origin = websocket.headers.get("origin")
     if origin is None:
         return True
-    server = websocket.scope.get("server")
-    if not server:
-        return False  # no port to compare with
-    port = "" if server[1] == 80 else f":{server[1]}"  # an origin leaves out port 80
-    return origin in {f"http://{host}{port}" for host in _LOOPBACK_HOSTS}
+    return origin in {f"http://{host}" for host in _panel_hosts(websocket.scope)}
 
 
 async def _until_closed(websocket: WebSocket) -> None:
@@ -236,5 +274,5 @@ def _settings_problem(update: object) -> str | None:
     return None
 
 
-def _refused(status: int, problem: str) -> JSONResponse:
-    return JSONResponse({"error": problem}, status_code=status)
+def _refused(status_code: int, problem: str) -> JSONResponse:
+    return JSONResponse({"error": problem}, status_code=status_code)

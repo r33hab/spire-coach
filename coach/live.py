@@ -46,7 +46,7 @@ import json
 import queue
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -187,6 +187,11 @@ class CoachSession:
 
     It installs itself as the engine's `on_restart`, so the panel says "engine
     restarting" while the client restarts the service (Review Focus 2).
+
+    `engine_problems` are what the engine service's health check found wrong when the
+    coach started, one phrase each. Advice needs a healthy engine as much as the right
+    game and mod, so they count as version problems: advice is off, with the reason,
+    unless the version override is on.
     """
 
     def __init__(
@@ -197,6 +202,7 @@ class CoachSession:
         publish: Callable[[CoachState], None],
         data_dir: Path,
         settings: CoachSettings,
+        engine_problems: Sequence[str] = (),
     ) -> None:
         if settings.mode not in MODES:
             raise ValueError(f"mode must be 'show' or 'quiz', got {settings.mode!r}")
@@ -220,7 +226,8 @@ class CoachSession:
         self._bridge_problem: str | None = None
         self._internal_error: str | None = None
         self._game_version: str | None = None
-        self._versions = VersionStatus(ok=True, problems=[])
+        self._engine_problems = list(engine_problems)
+        self._versions = self._with_engine_problems(VersionStatus(ok=True, problems=[]))
         self._run: dict = {"act": None, "floor": None}
         self._room_type: str | None = None
 
@@ -325,7 +332,7 @@ class CoachSession:
     def _on_settled(self, state: dict, seq: int | None) -> None:
         decision = classify(state)
         self._game_version = read_game_version()
-        self._versions = check_versions(self._game_version, state)
+        self._versions = self._with_engine_problems(check_versions(self._game_version, state))
         run = state.get("run") if isinstance(state.get("run"), dict) else {}
         self._run = {"act": run.get("act"), "floor": run.get("floor")}
         key = fingerprint(state)
@@ -449,6 +456,11 @@ class CoachSession:
             self._maybe_analyze(position)
 
     # --- analysis --------------------------------------------------------------------
+
+    def _with_engine_problems(self, versions: VersionStatus) -> VersionStatus:
+        if not self._engine_problems:
+            return versions
+        return VersionStatus(ok=False, problems=[*versions.problems, *self._engine_problems])
 
     def _advice_allowed(self) -> bool:
         return self._versions.ok or self._settings.override_versions

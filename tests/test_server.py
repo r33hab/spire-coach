@@ -1,8 +1,9 @@
 """Tests for the panel's server (coach/server.py), through Starlette's TestClient.
 
-Nothing binds a port: TestClient runs the app in-process. `Coach` stands in for the
-live session and the `coach` command's wiring around it: the state it last published,
-which the app reads, and the settings the app hands it.
+Nothing binds a port: TestClient runs the app in-process. It addresses the app the way
+the panel does, as http://127.0.0.1:15530, since the app refuses any other host.
+`Coach` stands in for the live session and the `coach` command's wiring around it: the
+state it last published, which the app reads, and the settings the app hands it.
 """
 
 from __future__ import annotations
@@ -22,6 +23,8 @@ from fastapi.testclient import TestClient
 from coach.bridge.versions import VersionStatus
 from coach.server import PANEL_DIR, Broadcaster, create_app, create_server
 from coach.view import CoachState
+
+PANEL_URL = "http://127.0.0.1:15530"  # where the panel's page is opened, on the default port
 
 
 def coach_state(**overrides) -> CoachState:
@@ -127,7 +130,7 @@ def receive(panel) -> dict:
 @pytest.fixture
 def client(coach):
     app = create_app(lambda: coach.state, coach.settings.append, broadcaster=coach.broadcaster)
-    with TestClient(app) as client:
+    with TestClient(app, base_url=PANEL_URL) as client:
         yield client
 
 
@@ -181,6 +184,56 @@ def test_the_panel_loads_nothing_from_outside_this_mac(name):
 def test_there_are_no_api_docs_pages(client, path):
     # FastAPI's docs pages load their scripts from a CDN: the coach stays offline.
     assert client.get(path).status_code == 404
+
+
+# --- the Host header: DNS rebinding --------------------------------------------------
+
+HTTP_ROUTES = [("GET", "/"), ("GET", "/state"), ("POST", "/settings"), ("GET", "/panel/panel.css")]
+
+
+def request(client, method: str, path: str, host: str):
+    body = {"mode": "quiz"} if method == "POST" else None
+    return client.request(method, path, headers={"host": host}, json=body)
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1:15530", "localhost:15530"])
+@pytest.mark.parametrize("method, path", HTTP_ROUTES)
+def test_requests_addressed_to_the_panels_own_host_are_answered(client, method, path, host):
+    assert request(client, method, path, host).status_code == 200
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "evil.example:15530",  # a page whose own name was rebound to 127.0.0.1
+        "evil.example",
+        "127.0.0.1.evil.example:15530",
+        "127.0.0.1:8000",  # addressed to another port
+        "127.0.0.1",  # the port left out: only port 80 may be
+        "localhost",
+    ],
+)
+@pytest.mark.parametrize("method, path", HTTP_ROUTES)
+def test_requests_addressed_to_any_other_host_are_refused(client, coach, method, path, host):
+    # After DNS rebinding a page on another site counts as same-origin with the coach
+    # in the browser, but the browser still names that site in the Host header.
+    response = request(client, method, path, host)
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "error": "The coach only answers requests addressed to 127.0.0.1 or localhost "
+        "on its own port."
+    }
+    assert coach.settings == []  # nothing was applied
+
+
+def test_on_port_80_the_host_leaves_the_port_out_as_browsers_send_it(coach):
+    app = create_app(lambda: coach.state, coach.settings.append)
+
+    with TestClient(app, base_url="http://127.0.0.1") as client:
+        assert client.get("/state").status_code == 200  # Host: 127.0.0.1
+        assert client.get("/state", headers={"host": "localhost"}).status_code == 200
+        assert client.get("/state", headers={"host": "evil.example"}).status_code == 400
 
 
 # --- POST /settings ------------------------------------------------------------------
@@ -261,7 +314,7 @@ def test_settings_the_coach_cannot_apply_come_back_as_one_sentence(coach):
         raise RuntimeError("the session\n  has stopped")
 
     app = create_app(lambda: coach.state, on_settings)
-    with TestClient(app) as client:
+    with TestClient(app, base_url=PANEL_URL) as client:
         response = client.post("/settings", json={"mode": "quiz"})
 
     assert response.status_code == 500
@@ -380,7 +433,7 @@ def test_a_client_that_sends_no_origin_may_connect(client, coach):
 def test_the_app_makes_its_own_broadcaster_when_given_none(coach):
     app = create_app(lambda: coach.state, coach.settings.append)
 
-    with TestClient(app) as client, client.websocket_connect("/ws") as panel:
+    with TestClient(app, base_url=PANEL_URL) as client, client.websocket_connect("/ws") as panel:
         receive(panel)
         app.state.broadcaster.publish(THINKING)
 
