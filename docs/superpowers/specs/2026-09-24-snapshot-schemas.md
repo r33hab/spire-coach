@@ -161,10 +161,11 @@ JSON consumed by the native export `Sts2_LoadCombatSnapshot` and emitted by `Sts
   "counters": {                         // every CombatState per-turn/per-combat counter by snake_case name; omitted = 0/false
     "whispering_earring_spent": true
   },
-  "pending_selection": null             // {"kind": int, "candidates": [int], "source_card_def_id": int, "amount": int,
+  "pending_selection": null             // {"kind": int, "candidates": [int], "candidate_cards": [EmuCard],
+                                        //  "source_card_def_id": int, "amount": int,
                                         //  "skippable": bool, "generated_candidates": [int], "generated_upgraded": bool,
                                         //  "generated_retained": bool, "after_selection_to_hand": [EmuCard],
-                                        //  "end_turn_awaiting_selection": bool}
+                                        //  "end_turn_awaiting_selection": bool}  -- see 2.3
 }
 ```
 
@@ -174,8 +175,9 @@ JSON consumed by the native export `Sts2_LoadCombatSnapshot` and emitted by `Sts
 
 `GetStateJson(LoadCombatSnapshot(doc))` must equal `doc` after normalization:
 - Omitted optional fields are filled with defaults.
-- `piles.draw.unordered` is compared as a multiset.
+- `piles.draw.unordered` and `pending_selection.candidate_cards` are compared as multisets.
 - `debuffs_at_round_start: null` becomes its derived value.
+- A candidate card that matched only by `def_id` and `upgraded` (2.3) comes back as the card it matched.
 
 ### 2.2 Loading rules
 
@@ -183,3 +185,20 @@ JSON consumed by the native export `Sts2_LoadCombatSnapshot` and emitted by `Sts
 - Buffs are added directly, never through `BuffSystem.Apply`.
 - Streams are seeded from the load seed. `piles.draw.unordered` is shuffled with that seed and placed between `known_top` and `known_bottom`, with `KnownTopCount`/`KnownBottomCount` set accordingly.
 - Unknown ids are an error, reported with a message naming the field. The loader never silently drops them.
+
+### 2.3 Draw-pile selections
+
+Amended 2026-09-25 (ledger ruling, converter Task 4). A draw-pile kind (`DrawPileToHand`, `TransformDrawPileToSoul`, `ExhaustFromDrawPile`, `TransformDrawToMinionDiveBomb`) chooses from `piles.draw` as loaded: `known_top`, then the unordered middle, then `known_bottom`. The loader shuffles the middle (2.2), so an index into it names no particular card. Such a selection therefore gives:
+
+- `candidates`: indices of its candidates in `known_top` and `known_bottom` only. An index into the unordered middle is an error.
+- `candidate_cards`: its candidates in `piles.draw.unordered`, by card (optional, default `[]`). Every entry must be a card the selection offers. Any other kind leaves it empty; a non-empty one is an error.
+
+The loader resolves `candidate_cards` AFTER its shuffle, and only within the unordered middle:
+
+1. Each card takes the first free middle card that equals it in every field.
+2. A card that no free middle card equals then takes a free middle card with its `def_id` and `upgraded`, provided every such card is the same card.
+3. A card that neither step places is an error: no free middle card matches it, or it matches several different cards by `def_id` and `upgraded` alone.
+
+The resolved indices join `candidates`, and the loaded selection keeps its candidates in pile order. The candidate cards only locate the candidates: nothing in any pile moves for them.
+
+`GetStateJson` writes a draw-pile selection the same way: its middle candidates as `candidate_cards`, sorted like `unordered`, and the rest as `candidates`. The same candidate cards are then offered whatever the load seed. A resampling clone (`Sts2_Clone` with resampling) still reshuffles the middle under an open selection's indices, as before.
