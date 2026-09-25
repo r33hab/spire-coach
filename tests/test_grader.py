@@ -686,9 +686,9 @@ def test_grade_selection_returns_none_when_no_candidate_can_be_identified():
     assert grade_selection(pre_live, post_live, analysis) is None
 
 
-def test_departed_candidate_index_returns_none_when_more_than_one_candidate_departed():
+def test_departed_candidate_index_never_guesses_between_two_departures():
     # Review Minor: _departed_candidate_index itself must not guess between two
-    # simultaneous departures -- ambiguous, so no index is returned at all.
+    # simultaneous departures -- it reports them as ambiguous, not as an index.
     candidate_a = make_card("c-a")
     candidate_b = make_card("c-b")
     pre_live = {
@@ -699,9 +699,178 @@ def test_departed_candidate_index_returns_none_when_more_than_one_candidate_depa
     }
     post_live = {"hand": [], "draw_pile": [], "discard_pile": [], "exhaust_pile": []}
 
-    result = _departed_candidate_index(pre_live, post_live, [candidate_a, candidate_b])
+    result = _departed_candidate_index(pre_live, post_live, [candidate_a, candidate_b], "hand")
 
-    assert result is None
+    assert result is not None and not isinstance(result, int)
+
+
+# --- grade_selection: a pick that moves a card between piles ------------------
+
+
+def pick(index, label, **overrides):
+    return make_stat(
+        kind="select",
+        card_index=None,
+        card_uid=None,
+        card_id=None,
+        target=None,
+        select_index=index,
+        hand_indices=[],
+        label=label,
+        **overrides,
+    )
+
+
+def test_a_burning_pact_exhaust_is_graded_as_the_card_that_left_the_hand():
+    # Burning Pact: exhaust a card from the hand, then draw 2. The exhausted card
+    # is still in a pile (the exhaust pile), but it has left the hand.
+    strike = make_card("s-1", card_id="STRIKE_IRONCLAD")
+    defend = make_card("d-1", card_id="DEFEND_IRONCLAD")
+    pre_live = {
+        "hand": [strike, defend],
+        "draw_pile": [make_card("b-1", card_id="BASH"), make_card("a-1", card_id="ANGER")],
+        "discard_pile": [],
+        "exhaust_pile": [],
+        "pending_selection": {
+            "kind": "HAND",
+            "pile": None,
+            "candidates": [strike, defend],
+            "min": 1,
+            "max": 1,
+            "can_skip": False,
+        },
+    }
+    post_live = {
+        "hand": [defend, make_card("b-1", card_id="BASH"), make_card("a-1", card_id="ANGER")],
+        "draw_pile": [],
+        "discard_pile": [],
+        "exhaust_pile": [strike],
+    }
+    exhaust_strike = pick(0, "Exhaust Strike", paired_diff_vs_best=3.0)
+    analysis = make_analysis([exhaust_strike, pick(1, "Exhaust Defend")], best=OTHER_BEST)
+
+    result = grade_selection(pre_live, post_live, analysis)
+
+    assert result is not None
+    assert result.played is exhaust_strike
+    assert result.label == "Inaccuracy"
+
+
+def test_a_headbutt_pick_is_graded_as_the_card_that_left_the_discard_pile():
+    # Headbutt: put a card from the discard pile on top of the draw pile. The
+    # grid names its pile, and the picked card left that pile for another one.
+    iron_wave = make_card("i-1", card_id="IRON_WAVE")
+    shrug = make_card("sh-1", card_id="SHRUG_IT_OFF")
+    pre_live = {
+        "hand": [],
+        "draw_pile": [make_card("x-1", card_id="BASH")],
+        "discard_pile": [iron_wave, shrug],
+        "exhaust_pile": [],
+        "pending_selection": {
+            "kind": "GRID",
+            "pile": "DISCARD",
+            "candidates": [iron_wave, shrug],
+            "min": 1,
+            "max": 1,
+            "can_skip": False,
+        },
+    }
+    post_live = {
+        "hand": [],
+        "draw_pile": [make_card("x-1", card_id="BASH"), shrug],
+        "discard_pile": [iron_wave],
+        "exhaust_pile": [],
+    }
+    top_shrug = pick(1, "Shrug It Off on top")
+    analysis = make_analysis([pick(0, "Iron Wave on top"), top_shrug], best=OTHER_BEST)
+
+    result = grade_selection(pre_live, post_live, analysis)
+
+    assert result is not None
+    assert result.played is top_shrug
+
+
+def test_a_skippable_pick_that_moves_a_card_between_piles_is_never_graded_as_a_skip():
+    card = make_card("c-1", card_id="STRIKE_IRONCLAD")
+    pre_live = {
+        "hand": [card],
+        "draw_pile": [],
+        "discard_pile": [],
+        "exhaust_pile": [],
+        "pending_selection": {
+            "kind": "HAND",
+            "pile": None,
+            "candidates": [card],
+            "min": 0,
+            "max": 1,
+            "can_skip": True,
+        },
+    }
+    post_live = {"hand": [], "draw_pile": [], "discard_pile": [card], "exhaust_pile": []}
+    discard_it = pick(0, "Discard Strike")
+    skip_it = make_stat(
+        kind="skip", card_index=None, card_uid=None, card_id=None, hand_indices=[], label="Skip"
+    )
+    analysis = make_analysis([discard_it, skip_it], best=OTHER_BEST)
+
+    result = grade_selection(pre_live, post_live, analysis)
+
+    assert result is not None
+    assert result.played is discard_it
+
+
+def test_a_multi_card_pick_is_ambiguous_even_when_a_drawn_card_matches_a_candidate():
+    # A "discard any number, draw that many" pick: two candidates left the hand at
+    # once, and a drawn Strike looks like a candidate. Nothing is guessed.
+    strike_a = make_card("s-a", card_id="STRIKE_IRONCLAD")
+    strike_b = make_card("s-b", card_id="STRIKE_IRONCLAD")
+    pre_live = {
+        "hand": [strike_a, strike_b],
+        "draw_pile": [],
+        "discard_pile": [],
+        "exhaust_pile": [],
+        "pending_selection": {
+            "kind": "HAND",
+            "pile": None,
+            "candidates": [strike_a, strike_b],
+            "min": 0,
+            "max": 999999999,
+            "can_skip": True,
+        },
+    }
+    post_live = {
+        "hand": [make_card("s-new", card_id="STRIKE_IRONCLAD")],
+        "draw_pile": [],
+        "discard_pile": [strike_a, strike_b],
+        "exhaust_pile": [],
+    }
+    analysis = make_analysis([pick(0, "Discard Strike")], best=OTHER_BEST)
+
+    assert grade_selection(pre_live, post_live, analysis) is None
+
+
+def test_grade_selection_grades_the_pick_on_the_thresholds_it_is_given():
+    card = make_card("c-1")
+    pre_live = {
+        "hand": [card],
+        "draw_pile": [],
+        "discard_pile": [],
+        "exhaust_pile": [],
+        "pending_selection": {
+            "kind": "HAND",
+            "pile": None,
+            "candidates": [card],
+            "min": 1,
+            "max": 1,
+            "can_skip": False,
+        },
+    }
+    post_live = {"hand": [], "draw_pile": [], "discard_pile": [], "exhaust_pile": [card]}
+    analysis = make_analysis([pick(0, "Exhaust it", paired_diff_vs_best=3.0)], best=OTHER_BEST)
+
+    assert grade_selection(pre_live, post_live, analysis).label == "Inaccuracy"
+    lenient = Thresholds(best_max_hp=5.0)
+    assert grade_selection(pre_live, post_live, analysis, lenient).label == "Best"
 
 
 # --- grade_selection: choose-a-card picks and skips (controller ruling) ------

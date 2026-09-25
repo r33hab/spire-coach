@@ -18,13 +18,15 @@ one. Both go through the lists of every hand index / belt slot a merged move
 covers, so a copy of an identical card or potion finds the merged move too.
 `grade_selection` does the same job for an in-combat selection
 (hand/grid/choose-a-card, or a skip), which the mod does not log as an
-action: a hand/grid pick is found by diffing which candidate left the hand
-or a pile between two live snapshots; a choose-a-card pick, whose freshly
-generated candidates never sat in a pile beforehand, by which new card
-arrived in the hand instead, matched by (id, upgraded) since the dealt card
-is a new instance; a skip, when neither happens and the selection allows
-one, by the analysis's own `skip` move. The engine analyzes both
-choose-a-card picks and skips, so both are graded (controller ruling).
+action. Diffing two live snapshots, a hand pick is the candidate that left the
+hand and a grid pick the one that left the pile the grid names, wherever the
+card went (Burning Pact exhausts it, Headbutt puts it on the draw pile); a
+choose-a-card pick, whose freshly generated candidates never sat in a pile
+beforehand, is the new card that arrived in the hand, matched by (id,
+upgraded) since the dealt card is a new instance; a skip, when neither
+happens and the selection allows one, is the analysis's own `skip` move. The
+engine analyzes both choose-a-card picks and skips, so both are graded
+(controller ruling).
 """
 
 from __future__ import annotations
@@ -215,32 +217,46 @@ def identify_move(action_entry: dict, pre_live: dict, analysis: Analysis) -> Mov
 
 # --- grade_selection --------------------------------------------------------
 
-_PILE_KEYS = ("hand", "draw_pile", "discard_pile", "exhaust_pile")
+# The live pile a selection's candidates were picked from (schema section 1.1): the
+# hand for a HAND selection, and for a GRID the combat pile it names. A CHOOSE
+# screen's candidates were freshly made and never sat in any pile, and neither did a
+# grid's over a plain list of cards (its `pile` is null).
+_GRID_PILES = {"DRAW": "draw_pile", "DISCARD": "discard_pile", "EXHAUST": "exhaust_pile"}
+
+_AMBIGUOUS = object()  # sentinel: more than one card could be the pick
 
 
-def _pile_uid_counts(live: dict) -> Counter:
-    counts: Counter = Counter()
-    for key in _PILE_KEYS:
-        for card in live.get(key) or []:
-            uid = card.get("uid")
-            if uid is not None:
-                counts[uid] += 1
-    return counts
+def _source_pile(pending: dict) -> str | None:
+    kind = pending.get("kind")
+    if kind == "HAND":
+        return "hand"
+    if kind == "GRID":
+        return _GRID_PILES.get(pending.get("pile"))
+    return None
 
 
-def _departed_candidate_index(
-    pre_live: dict, post_live: dict, candidates: list[dict]
-) -> int | None:
-    """The one candidate whose uid count in the hand/piles dropped between the two snapshots."""
-    pre_counts = _pile_uid_counts(pre_live)
-    post_counts = _pile_uid_counts(post_live)
+def _uid_counts(live: dict, pile: str) -> Counter:
+    return Counter(card.get("uid") for card in live.get(pile) or [] if card.get("uid"))
+
+
+def _departed_candidate_index(pre_live: dict, post_live: dict, candidates: list[dict], pile: str):
+    """The index of the one candidate that left `pile` between the two snapshots,
+    `_AMBIGUOUS` if several did, or None if none did.
+
+    Where the card went does not matter: exhausted from the hand (Burning Pact) or
+    put from the discard pile onto the draw pile (Headbutt), it has left its pile all
+    the same, although it is still in another one.
+    """
+    pre_counts = _uid_counts(pre_live, pile)
+    post_counts = _uid_counts(post_live, pile)
     departed = [
         index
         for index, card in enumerate(candidates)
-        if card.get("uid") is not None
-        and pre_counts[card["uid"]] > post_counts.get(card["uid"], 0)
+        if card.get("uid") is not None and pre_counts[card["uid"]] > post_counts[card["uid"]]
     ]
-    return departed[0] if len(departed) == 1 else None
+    if len(departed) > 1:
+        return _AMBIGUOUS
+    return departed[0] if departed else None
 
 
 def _select_child(indices: list[int], analysis: Analysis) -> MoveStat | None:
@@ -277,9 +293,6 @@ def _matching_candidate_indices(card: dict, candidates: list[dict]) -> list[int]
     ]
 
 
-_AMBIGUOUS = object()  # sentinel: more than one new hand card matched a candidate
-
-
 def _choose_pick_indices(pre_live: dict, post_live: dict, candidates: list[dict]):
     """The tied candidate indices for a CHOOSE pick, `_AMBIGUOUS`, or None (no pick).
 
@@ -304,34 +317,54 @@ def _choose_pick_indices(pre_live: dict, post_live: dict, candidates: list[dict]
     return matches[0]
 
 
-def grade_selection(pre_live: dict, post_live: dict, analysis: Analysis) -> Grade | None:
-    """Grade an in-combat selection: hand/grid, choose-a-card, or a skip.
+def grade_selection(
+    pre_live: dict,
+    post_live: dict,
+    analysis: Analysis,
+    thresholds: Thresholds = DEFAULT_THRESHOLDS,
+) -> Grade | None:
+    """Grade an in-combat selection: a hand or grid pick, a choose-a-card pick, or a skip.
 
-    A hand/grid pick is identified by a candidate departing the hand or a
-    pile; a choose-a-card pick by a new, matching card arriving in the hand;
-    a skip (when `can_skip` and neither happens) by the analysis's own
-    `skip` move.
+    `post_live` is the next settled position, after the selection was confirmed. A
+    partial pick in a multi-card selection is never seen as a position of its own:
+    the mod builds `player.hand` from the fight's hand pile, which a pick only leaves
+    on confirmation (the screen moves the card's holder, not the card), so the
+    position's fingerprint does not change until then.
+
+    A hand or grid pick is the candidate that left the hand, or the grid's own pile.
+    Failing that, the pick is the one new card in the hand that matches a candidate
+    by (id, upgraded): a choose-a-card pick (or one from a grid over a plain list of
+    cards), whose cards never sat in a pile, or a copy of the card a hand pick kept
+    (Dual Wield). Only when neither happened, and the selection allows it, is it a
+    skip. A pick of several cards at once is ambiguous and not graded.
     """
     pending = pre_live.get("pending_selection")
     if not pending:
         return None
     candidates = pending.get("candidates") or []
 
-    departed_index = _departed_candidate_index(pre_live, post_live, candidates)
-    if departed_index is not None:
-        stat = _select_child([departed_index], analysis)
-        return grade(stat, analysis) if stat is not None else None
+    pile = _source_pile(pending)
+    if pile is not None:
+        departed = _departed_candidate_index(pre_live, post_live, candidates, pile)
+        if departed is _AMBIGUOUS:
+            return None
+        if departed is not None:
+            return _grade_pick([departed], analysis, thresholds)
 
     choose_indices = _choose_pick_indices(pre_live, post_live, candidates)
     if choose_indices is _AMBIGUOUS:
         return None
     if choose_indices is not None:
-        stat = _select_child(choose_indices, analysis)
-        return grade(stat, analysis) if stat is not None else None
+        return _grade_pick(choose_indices, analysis, thresholds)
 
     if pending.get("can_skip"):
         skip_stat = next((m for m in analysis.moves if m.kind == "skip"), None)
         if skip_stat is not None:
-            return grade(skip_stat, analysis)
+            return grade(skip_stat, analysis, thresholds)
 
     return None
+
+
+def _grade_pick(indices: list[int], analysis: Analysis, thresholds: Thresholds) -> Grade | None:
+    stat = _select_child(indices, analysis)
+    return grade(stat, analysis, thresholds) if stat is not None else None

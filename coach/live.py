@@ -536,11 +536,11 @@ class CoachSession:
         analysis = position.analysis
         found = None
         if analysis is not None and post.live is not None:
-            found = grader.grade_selection(position.live, post.live, analysis)
+            found = grader.grade_selection(
+                position.live, post.live, analysis, self._settings.thresholds
+            )
         if found is not None:
-            # grade_selection grades on the default thresholds: regrade its pick on
-            # the configured ones.
-            graded = grade_dict(grader.grade(found.played, analysis, self._settings.thresholds))
+            graded = grade_dict(found)
         else:
             graded = ungraded_dict(_UNIDENTIFIED_SELECTION, analysis)
         number = self._record_grade(graded, position, seq=item.pre.seq, entry=None)
