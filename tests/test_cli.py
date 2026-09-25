@@ -1,17 +1,39 @@
+import contextlib
+import copy
 import errno
+import functools
+import io
 import json
 import shutil
+import signal
+import socket
 import subprocess
+import sys
+import threading
+import time
 from pathlib import Path
+from unittest import mock
+
+import httpx
+import pytest
+from websockets.sync.client import connect
 
 import coach.cli as cli
 from coach.bridge.client import BridgeAuthError, BridgeError, BridgeUnavailable
+from coach.bridge.versions import VersionStatus
 from coach.capture import CaptureStats
 from coach.config import Config
+from coach.engine import EngineClient
+from coach.live import CoachSettings, engine_health_problems
 from coach.modinstall import InstallError
 from coach.saves import SaveError, backup
+from coach.view import CoachState
 
 FIXTURES = Path(__file__).parent / "fixtures" / "mod"
+FAKE_ENGINE = Path(__file__).parent / "fakes" / "fake_engine_service.py"
+# How long a test waits on the running coach before it gives up. Generous on purpose:
+# it only ever runs out on a broken test, while a loaded machine can be slow.
+UNDER_LOAD_S = 60.0
 
 
 def never_running():
@@ -696,3 +718,626 @@ def test_config_value_error_at_the_boundary_is_one_line_and_exit_1(monkeypatch, 
     assert_one_clean_line(
         capsys.readouterr(), "invalid setting SPIRE_COACH_POLL_S=abc: must be a number"
     )
+
+
+# --- coach: argument parsing ------------------------------------------------------------
+
+COACH_DEFAULTS = {"workers": 4, "budget_s": 1.5, "port": 15530, "window": True, "mode": "show"}
+
+
+def record_coach_calls(monkeypatch, tmp_path):
+    config = make_config(tmp_path)
+    monkeypatch.setattr(cli, "load_config", lambda: config)
+    calls = []
+    monkeypatch.setattr(cli, "cmd_coach", lambda cfg, **options: calls.append((cfg, options)) or 0)
+    return config, calls
+
+
+def test_coach_dispatches_with_the_defaults(monkeypatch, tmp_path):
+    config, calls = record_coach_calls(monkeypatch, tmp_path)
+
+    assert cli.main(["coach"]) == 0
+    assert calls == [(config, COACH_DEFAULTS)]
+
+
+def test_coach_dispatches_with_every_option_given(monkeypatch, tmp_path):
+    config, calls = record_coach_calls(monkeypatch, tmp_path)
+    argv = ["coach", "--workers", "6", "--budget", "2.5", "--port", "15600"]
+
+    assert cli.main([*argv, "--no-window", "--mode", "quiz"]) == 0
+    assert calls == [
+        (config, {"workers": 6, "budget_s": 2.5, "port": 15600, "window": False, "mode": "quiz"})
+    ]
+
+
+@pytest.mark.parametrize(
+    "option, value, problem",
+    [
+        ("--workers", "0", "must be at least 1, got 0"),
+        ("--workers", "two", "'two' is not a whole number"),
+        ("--budget", "0", "must be a positive number of seconds, got 0"),
+        ("--budget", "-1.5", "must be a positive number of seconds, got -1.5"),
+        ("--budget", "nan", "must be a positive number of seconds, got nan"),
+        ("--budget", "soon", "'soon' is not a number"),
+        ("--port", "0", "must be a port from 1 to 65535, got 0"),
+        ("--port", "65536", "must be a port from 1 to 65535, got 65536"),
+        ("--mode", "hard", "invalid choice: 'hard'"),
+    ],
+)
+def test_coach_refuses_a_bad_option_before_starting_anything(
+    monkeypatch, tmp_path, capsys, option, value, problem
+):
+    _, calls = record_coach_calls(monkeypatch, tmp_path)
+
+    with pytest.raises(SystemExit) as exited:
+        cli.main(["coach", option, value])
+
+    assert exited.value.code == 2
+    error = capsys.readouterr().err.strip().splitlines()[-1]
+    assert error.startswith(f"spire-coach coach: error: argument {option}: ")
+    assert problem in error
+    assert calls == []
+
+
+def test_a_coach_that_cannot_start_says_why_in_one_line_and_exits_1(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(cli, "load_config", lambda: make_config(tmp_path))
+
+    problem = "The coach panel could not listen on 127.0.0.1:15530."
+
+    def cannot_start(config, **options):
+        raise cli.CoachError(problem)
+
+    monkeypatch.setattr(cli, "cmd_coach", cannot_start)
+
+    assert cli.main(["coach"]) == 1
+    assert_one_clean_line(capsys.readouterr(), problem)
+
+
+# --- coach: the engine service's health check ---------------------------------------------
+
+
+def fake_engine_cmd(tmp_path, control=None):
+    control_path = tmp_path / "engine-control.json"
+    control_path.write_text(json.dumps(control or {}), encoding="utf-8")
+    return [sys.executable, str(FAKE_ENGINE), str(control_path)]
+
+
+def engine_problems(cmd):
+    engine = EngineClient(cmd, request_timeout_s=5.0)
+    try:
+        return engine_health_problems(engine)
+    finally:
+        engine.close()
+
+
+def test_a_healthy_engine_that_reports_its_versions_has_no_problem(tmp_path):
+    assert engine_problems(fake_engine_cmd(tmp_path)) == []
+
+
+def test_an_engine_that_reports_no_native_api_version_is_a_problem(tmp_path):
+    health = {"service_version": "old", "game_version_target": "v0.107.1"}
+
+    problems = engine_problems(fake_engine_cmd(tmp_path, {"health": health}))
+
+    assert problems == ["the engine service did not report its native API version"]
+
+
+def test_an_engine_built_for_another_game_version_is_a_problem(tmp_path):
+    health = {"native_api_version": 1, "game_version_target": "v0.111.0"}
+
+    problems = engine_problems(fake_engine_cmd(tmp_path, {"health": health}))
+
+    assert problems == ["the engine service targets game version v0.111.0, not v0.107.1"]
+
+
+@pytest.mark.parametrize(
+    "control, reason",
+    [
+        (
+            {"ok_false": {"type": "internal", "message": "no native\nlibrary"}},
+            "engine returned internal: no native library",
+        ),
+        (
+            {"crash_always": True},  # it dies at every request, a restarted one too
+            "engine service unavailable after a restart: the engine service closed its output",
+        ),
+    ],
+)
+def test_an_engine_that_fails_its_health_check_is_a_problem_named_in_one_line(
+    tmp_path, control, reason
+):
+    cmd = fake_engine_cmd(tmp_path, control)
+
+    assert engine_problems(cmd) == [f"the engine service failed its health check ({reason})"]
+
+
+def test_an_engine_service_that_cannot_start_is_a_problem(tmp_path):
+    [problem] = engine_problems([str(tmp_path / "no-such-engine-service")])
+
+    assert problem.startswith(
+        "the engine service failed its health check (could not start the engine service:"
+    )
+    assert "\n" not in problem
+
+
+# --- coach: the panel's state, kept before it is pushed -------------------------------------
+
+
+def coach_state(status: str) -> CoachState:
+    return CoachState(
+        status=status,
+        status_text=f"{status}.",
+        recommendation=None,
+        last_grade=None,
+        mode="show",
+        versions=VersionStatus(ok=True, problems=[]),
+        run={"act": 1, "floor": 6},
+    )
+
+
+def test_the_panel_feed_keeps_each_state_before_the_broadcaster_pushes_it():
+    # coach/server.py's contract: a panel that connects while a state is published
+    # then reads it as its first state, or has it pushed; never neither.
+    first, second = coach_state("thinking"), coach_state("advice")
+    pushed = []
+
+    class Broadcaster:
+        def publish(self, state):
+            pushed.append((state, feed.state()))  # what a panel connecting now would read
+
+    feed = cli._PanelFeed(first, Broadcaster())
+    assert feed.state() is first
+
+    feed.publish(second)
+
+    assert pushed == [(second, second)]
+    assert feed.state() is second
+
+
+# --- coach: the whole command, with a fake mod and a fake engine service -------------------
+
+
+class FakeMod:
+    """The mod as the coach sees it: a monster fight on screen and no moves logged."""
+
+    def __init__(self):
+        self.state = json.loads((FIXTURES / "combat_full.json").read_text(encoding="utf-8"))
+        self.closed = False
+
+    def get_state(self):
+        return copy.deepcopy(self.state)
+
+    def actions_since(self, since):
+        return {"status": "ok", "latest_seq": self.state["action_log_seq"], "entries": []}
+
+    def close(self):
+        self.closed = True
+
+
+def free_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def until(condition, timeout=UNDER_LOAD_S) -> bool:
+    deadline = time.monotonic() + timeout
+    while True:
+        with contextlib.suppress(httpx.HTTPError):
+            if condition():
+                return True
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.02)
+
+
+def never_ctrl_c():
+    pytest.fail("the coach waited for Ctrl-C")
+
+
+class CoachRun:
+    """One `spire-coach coach` against fakes: the mod, the window and the user's Ctrl-C
+    are stand-ins, while the engine service is a real child process running the fake
+    service script and the panel's server really listens on 127.0.0.1."""
+
+    def __init__(self, tmp_path, engine_control=None, **config):
+        self.port = free_port()
+        self.url = f"http://127.0.0.1:{self.port}/"
+        self.mod = FakeMod()
+        self.config = make_config(tmp_path, poll_interval_s=0.02, **config)
+        self.requests = tmp_path / "engine-requests.jsonl"
+        self.engine_cmd = fake_engine_cmd(tmp_path)
+        self.control = self.engine_cmd[-1]  # in the command line of every service it runs
+        self.set_engine_control(**(engine_control or {}))
+        self.steps: list[str] = []  # what the stand-ins for the window and Ctrl-C saw happen
+        self.stops: list[str] = []  # the session, the engine and the server, as they stopped
+        self._threads_before = set(threading.enumerate())
+
+    def set_engine_control(self, **control):
+        """What the fake engine service does from its next request on."""
+        control = {"log_requests_to": str(self.requests), **control}
+        Path(self.control).write_text(json.dumps(control), encoding="utf-8")
+
+    def __call__(self, *, retry_port_race=True, **options):
+        try:
+            return self._run(**options)
+        except cli.CoachError:
+            if not retry_port_race:
+                raise
+            # The free port found for this run was taken meanwhile (by another test run,
+            # say): once more, on a new one.
+            self.port = free_port()
+            self.url = f"http://127.0.0.1:{self.port}/"
+            self.mod = FakeMod()
+            self.stops.clear()
+            self.requests.unlink(missing_ok=True)
+            return self._run(**options)
+
+    def _run(self, **options):
+        options = {"engine_cmd": self.engine_cmd, "port": self.port, **options}
+        with self.recording_the_stops():
+            return cli.cmd_coach(self.config, client_factory=lambda url, token: self.mod, **options)
+
+    @contextlib.contextmanager
+    def recording_the_stops(self):
+        """Thin wrappers note when the session, the engine and the server stop."""
+        stops = self.stops
+        make_engine, make_server = cli.EngineClient, cli.create_server
+
+        class Session(cli.CoachSession):
+            def close(self):
+                ended = super().close()
+                stops.append("session closed")
+                return ended
+
+        def engine(cmd, *, workers):
+            client = make_engine(cmd, workers=workers)
+            close = client.close
+
+            def closed():
+                close()
+                stops.append("engine closed")
+
+            client.close = closed
+            return client
+
+        def server(app, *, port):
+            made = make_server(app, port=port)
+            run = made.run
+
+            def ran(*args, **kwargs):
+                try:
+                    return run(*args, **kwargs)
+                finally:
+                    stops.append("server stopped")
+
+            made.run = ran
+            return made
+
+        with (
+            mock.patch.object(cli, "CoachSession", Session),
+            mock.patch.object(cli, "EngineClient", engine),
+            mock.patch.object(cli, "create_server", server),
+        ):
+            yield
+
+    def state(self) -> dict:
+        return httpx.get(self.url + "state", timeout=5.0).json()
+
+    def shows(self, status: str) -> bool:
+        return until(lambda: self.state()["status"] == status)
+
+    def engine_requests(self) -> list[dict]:
+        lines = self.requests.read_text(encoding="utf-8").splitlines()
+        return [json.loads(line) for line in lines]
+
+    def engine_services(self) -> list[str]:
+        """The engine services of this run still running, as `ps` lists them."""
+        listing = subprocess.run(
+            ["ps", "-A", "-o", "pid=,command="], capture_output=True, text=True, check=True
+        ).stdout
+        return [line for line in listing.splitlines() if self.control in line]
+
+    def new_threads(self) -> list[str]:
+        """The threads started since this run began that are still alive."""
+        return sorted(
+            thread.name for thread in threading.enumerate() if thread not in self._threads_before
+        )
+
+    def assert_all_stopped(self, order=("session closed", "engine closed", "server stopped")):
+        assert self.engine_services() == [], "an engine service is still running"
+        assert self.new_threads() == [], "a thread the coach started is still running"
+        with pytest.raises(httpx.ConnectError):
+            self.state()  # the panel's server no longer listens
+        assert self.mod.closed
+        assert self.stops == list(order)
+
+
+@pytest.fixture(autouse=True)
+def matching_game_version(monkeypatch):
+    # The live session reads the installed game's version on every settled state; no
+    # test ever reads the real install.
+    monkeypatch.setattr("coach.live.read_game_version", lambda: "v0.107.1")
+
+
+def test_the_coach_serves_advice_until_ctrl_c_then_stops_all_it_started(tmp_path, capsys):
+    run = CoachRun(tmp_path)
+
+    def wait_for_ctrl_c():
+        run.steps.append("waited for Ctrl-C")
+        assert run.shows("advice")
+        with connect(f"ws://127.0.0.1:{run.port}/ws") as panel:  # a panel connecting late...
+            assert json.loads(panel.recv(timeout=10))["status"] == "advice"  # ...is up to date
+        assert len(run.engine_services()) == 1  # the engine service is a child process
+        assert {"coach-engine", "coach-server", "coach-session"} <= set(run.new_threads())
+        raise KeyboardInterrupt  # the user presses Ctrl-C
+
+    assert run(window=False, wait_for_ctrl_c=wait_for_ctrl_c) == 0
+
+    assert run.steps == ["waited for Ctrl-C"]
+    run.assert_all_stopped()
+    methods = [request["method"] for request in run.engine_requests()]
+    assert methods[0] == "health"  # checked at startup, before any advice
+    assert "analyze" in methods
+    output = capsys.readouterr()
+    assert output.out.splitlines() == [
+        "Starting the engine service…",
+        f"The coach panel is at {run.url}",
+        "Press Ctrl-C to stop the coach.",
+        "Stopping the coach…",
+    ]
+    assert output.err == ""
+
+
+def test_closing_the_window_stops_the_coach_and_all_it_started(tmp_path):
+    run = CoachRun(tmp_path)
+
+    def show_window(url):  # pywebview's window, on the main thread
+        run.steps.append(f"opened the window on {url}")
+        assert run.shows("advice")
+        return True  # the user closed it
+
+    assert run(window=True, show_window=show_window, wait_for_ctrl_c=never_ctrl_c) == 0
+
+    assert run.steps == [f"opened the window on {run.url}"]
+    run.assert_all_stopped()
+
+
+def test_when_the_window_cannot_open_the_coach_serves_the_browser_until_ctrl_c(tmp_path):
+    run = CoachRun(tmp_path)
+
+    def show_window(url):
+        run.steps.append(f"tried the window on {url}")
+        return False  # it could not open: the URL was printed for the browser instead
+
+    def wait_for_ctrl_c():
+        run.steps.append("waited for Ctrl-C")
+        assert run.shows("advice")  # still served after the fallback
+        raise KeyboardInterrupt
+
+    assert run(window=True, show_window=show_window, wait_for_ctrl_c=wait_for_ctrl_c) == 0
+
+    assert run.steps == [f"tried the window on {run.url}", "waited for Ctrl-C"]
+    run.assert_all_stopped()
+
+
+def test_the_options_reach_the_engine_service_and_the_session(tmp_path, monkeypatch):
+    run = CoachRun(tmp_path)
+    launched = []
+
+    def engine_client(cmd, *, workers):
+        launched.append((cmd, workers))
+        return EngineClient(run.engine_cmd, workers=workers)  # the fake, not the simulator
+
+    monkeypatch.setattr(cli, "EngineClient", engine_client)
+
+    def wait_for_ctrl_c():
+        run.steps.append("waited for Ctrl-C")
+        assert run.shows("advice")
+        assert run.state()["mode"] == "quiz"
+        assert run.state()["recommendation"]["best"] is None  # hidden until you move
+        raise KeyboardInterrupt
+
+    options = dict(engine_cmd=None, workers=6, budget_s=0.25, mode="quiz", window=False)
+    assert run(**options, wait_for_ctrl_c=wait_for_ctrl_c) == 0
+
+    assert run.steps == ["waited for Ctrl-C"]
+    assert launched == [(None, 6)]  # the default launch, with 6 search workers
+    [analyze] = [r for r in run.engine_requests() if r["method"] == "analyze"]
+    assert analyze["params"]["time_budget_s"] == 0.25
+    run.assert_all_stopped()
+
+
+def test_an_unhealthy_engine_keeps_advice_off_until_the_panel_overrides_it(tmp_path, capsys):
+    old_service = {"service_version": "old", "game_version_target": "v0.107.1"}
+    run = CoachRun(tmp_path, engine_control={"health": old_service})
+    reason = "the engine service did not report its native API version"
+
+    def wait_for_ctrl_c():
+        run.steps.append("waited for Ctrl-C")
+        assert run.shows("advice_off")
+        assert reason in run.state()["status_text"]
+        override = httpx.post(run.url + "settings", json={"override_versions": True}, timeout=5)
+        assert override.status_code == 200
+        assert run.shows("advice")
+        warnings = run.state()["recommendation"]["warnings"]
+        assert f"The version check is overridden: {reason}." in warnings
+        raise KeyboardInterrupt
+
+    assert run(window=False, wait_for_ctrl_c=wait_for_ctrl_c) == 0
+
+    assert run.steps == ["waited for Ctrl-C"]
+    run.assert_all_stopped()
+    assert capsys.readouterr().err.splitlines() == [
+        f"Advice is off: {reason}. Turn on the version override in the panel to see advice anyway."
+    ]
+
+
+def test_a_port_already_taken_is_one_line_on_stderr_and_leaves_nothing_running(
+    tmp_path, monkeypatch, capsys
+):
+    run = CoachRun(tmp_path)
+    monkeypatch.setattr(cli, "load_config", lambda: run.config)
+    monkeypatch.setattr(cli, "ModClient", lambda base_url, token: run.mod)
+    monkeypatch.setattr(
+        cli, "EngineClient", lambda cmd, *, workers: EngineClient(run.engine_cmd, workers=workers)
+    )
+    # Noticed when the server gives up, not when the deadline for it to listen runs out.
+    monkeypatch.setattr(cli, "_SERVER_START_S", UNDER_LOAD_S)
+
+    with socket.socket() as taken:
+        taken.bind(("127.0.0.1", run.port))
+        taken.listen()
+        started = time.monotonic()
+        with run.recording_the_stops():
+            result = cli.main(["coach", "--port", str(run.port), "--no-window"])
+        took = time.monotonic() - started
+
+    assert result == 1
+    assert capsys.readouterr().err.splitlines() == [  # uvicorn's own error log stays quiet
+        f"The coach panel could not listen on 127.0.0.1:{run.port}: is another coach "
+        "running? Choose another port with --port."
+    ]
+    assert took < UNDER_LOAD_S / 2
+    # The server gave up at startup; the session's thread never started.
+    run.assert_all_stopped(order=("server stopped", "session closed", "engine closed"))
+
+
+def test_the_first_health_check_waits_for_a_slow_engine_start(tmp_path, monkeypatch):
+    # A cold start of the real service (uv, imports, the search workers) can outlast an
+    # ordinary request: the startup check waits up to the configured startup timeout.
+    run = CoachRun(tmp_path, engine_control={"health_delay_s": 1.0}, engine_start_timeout_s=30.0)
+    monkeypatch.setattr(
+        cli,
+        "EngineClient",
+        lambda cmd, *, workers: EngineClient(cmd, workers=workers, request_timeout_s=0.3),
+    )
+    waited = []
+
+    def health_check(engine, *, timeout_s=None):
+        waited.append(timeout_s)
+        return engine_health_problems(engine, timeout_s=timeout_s)
+
+    monkeypatch.setattr(cli, "engine_health_problems", health_check)
+
+    def wait_for_ctrl_c():
+        run.steps.append("waited for Ctrl-C")
+        # The first verdict, before any later check of the engine could change it.
+        assert until(lambda: run.state()["status"] in ("advice", "advice_off"))
+        assert run.state()["status"] == "advice"  # not "... did not respond within 0.3s"
+        raise KeyboardInterrupt
+
+    assert run(window=False, wait_for_ctrl_c=wait_for_ctrl_c) == 0
+
+    assert run.steps == ["waited for Ctrl-C"]
+    assert waited == [30.0]  # the configured startup timeout
+    assert [r["method"] for r in run.engine_requests()].count("health") == 1  # answered
+    run.assert_all_stopped()
+
+
+@pytest.mark.parametrize(
+    "broken, reason",
+    [
+        (
+            {"health": {"service_version": "old", "game_version_target": "v0.107.1"}},
+            "did not report its native API version",
+        ),
+        ({"crash_always": True}, "failed its health check"),  # the next check starts it anew
+    ],
+)
+def test_a_failing_engine_is_checked_again_and_advice_comes_on_without_a_restart(
+    tmp_path, monkeypatch, broken, reason
+):
+    run = CoachRun(tmp_path, engine_control=broken)
+    checked_often = functools.partial(CoachSettings, engine_recheck_s=0.2)
+    monkeypatch.setattr(cli, "CoachSettings", checked_often)
+
+    def wait_for_ctrl_c():
+        run.steps.append("waited for Ctrl-C")
+        assert run.shows("advice_off")
+        assert reason in run.state()["status_text"]
+        run.set_engine_control()  # the engine is fixed while the coach runs
+        assert run.shows("advice")
+        raise KeyboardInterrupt
+
+    assert run(window=False, wait_for_ctrl_c=wait_for_ctrl_c) == 0
+
+    assert run.steps == ["waited for Ctrl-C"]
+    run.assert_all_stopped()
+
+
+class TerminalGoneWhileStopping(io.StringIO):
+    """A terminal that goes away just as the coach says it is stopping."""
+
+    def write(self, text):
+        if "Stopping" in text:
+            raise BrokenPipeError(32, "Broken pipe")
+        return super().write(text)
+
+
+def test_a_terminal_gone_away_does_not_keep_the_coach_from_stopping_all(tmp_path, monkeypatch):
+    run = CoachRun(tmp_path)
+    monkeypatch.setattr(sys, "stdout", TerminalGoneWhileStopping())
+
+    def wait_for_ctrl_c():
+        run.steps.append("waited for Ctrl-C")
+        assert run.shows("advice")
+        raise KeyboardInterrupt
+
+    assert run(window=False, wait_for_ctrl_c=wait_for_ctrl_c) == 0
+
+    assert run.steps == ["waited for Ctrl-C"]
+    run.assert_all_stopped()
+
+
+def test_a_step_of_stopping_that_fails_does_not_skip_the_steps_after_it(tmp_path, monkeypatch):
+    run = CoachRun(tmp_path)
+
+    def engine_client(cmd, *, workers):
+        engine = EngineClient(cmd, workers=workers)
+        close = engine.close
+
+        def failing_close():
+            close()
+            raise OSError("the engine log could not be closed")
+
+        engine.close = failing_close
+        return engine
+
+    monkeypatch.setattr(cli, "EngineClient", engine_client)
+
+    def wait_for_ctrl_c():
+        run.steps.append("waited for Ctrl-C")
+        assert run.shows("advice")
+        raise KeyboardInterrupt
+
+    with pytest.raises(OSError, match="engine log could not be closed"):
+        run(window=False, wait_for_ctrl_c=wait_for_ctrl_c)
+
+    assert run.steps == ["waited for Ctrl-C"]
+    run.assert_all_stopped(order=("session closed", "server stopped"))  # the rest still ran
+
+
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGHUP])
+def test_sigterm_and_sighup_stop_the_coach_in_order_as_ctrl_c_does(tmp_path, signum):
+    # A plain `kill`, or the terminal closing, must not end the coach halfway.
+    run = CoachRun(tmp_path)
+
+    def not_for_the_test(signum, frame):
+        raise AssertionError(f"signal {signum} reached the test instead of the coach")
+
+    previous = signal.signal(signum, not_for_the_test)  # else it would end pytest itself
+    try:
+
+        def wait_for_ctrl_c():
+            run.steps.append("waited")
+            assert run.shows("advice")
+            signal.raise_signal(signum)
+            pytest.fail("the signal did not stop the coach")
+
+        assert run(window=False, wait_for_ctrl_c=wait_for_ctrl_c) == 0
+    finally:
+        signal.signal(signum, previous)
+
+    assert run.steps == ["waited"]
+    run.assert_all_stopped()

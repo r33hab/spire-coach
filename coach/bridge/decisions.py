@@ -118,12 +118,22 @@ class Stabilizer:
     that same fingerprint return None, so a consumer stores each distinct
     settled position exactly once. Any unsettled poll, or a change in the
     fingerprint, restarts the streak from zero.
+
+    `streak_first` is the state the current streak's first poll showed, and
+    `before_streak` the state polled just before that streak began (None if
+    there was none). They let a consumer tell when the position first appeared
+    without re-deriving the streak rule: the live coach compares their
+    action-log seqs to know whether the log moved on before the position was
+    first seen (coach/live.py).
     """
 
     def __init__(self) -> None:
         self._streak_fingerprint: str | None = None
         self._streak_count = 0
         self._emitted_current_streak = False
+        self._last_fed: dict | None = None
+        self.streak_first: dict | None = None
+        self.before_streak: dict | None = None
 
     def feed(self, state: dict) -> dict | None:
         current = fingerprint(state) if is_settled(state) else None
@@ -132,6 +142,9 @@ class Stabilizer:
             self._streak_fingerprint = current
             self._streak_count = 0
             self._emitted_current_streak = False
+            self.streak_first = state
+            self.before_streak = self._last_fed
+        self._last_fed = state
 
         if current is None:
             return None

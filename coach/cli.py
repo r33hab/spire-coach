@@ -1,22 +1,30 @@
-"""spire-coach: setup (saves, mod install, doctor) and capture mode.
+"""spire-coach: setup (saves, mod install, doctor), capture mode and the live coach.
 
 This is the console entry point (`spire-coach`). Subcommands wire together
-coach.saves, coach.modinstall and coach.capture; this module's own job is
-argument parsing and turning every exception at the boundary into one clear
-line on stderr, never a traceback (Review Focus #2/#3).
+coach.saves, coach.modinstall and coach.capture, and for `coach` the live session,
+the engine service, the panel's server and its window; this module's own job is
+argument parsing, that wiring, and turning every exception at the boundary into one
+clear line on stderr, never a traceback (Review Focus #2/#3).
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
+import math
+import signal
 import subprocess
 import sys
-from collections.abc import Callable
+import threading
+import time
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
+import uvicorn
+
 from coach.bridge.client import BridgeAuthError, BridgeError, ModClient
-from coach.bridge.versions import check_versions, read_game_version
+from coach.bridge.versions import VersionStatus, check_versions, read_game_version
 from coach.capture import capture_loop
 from coach.config import (
     CONF_FILE_NAME,
@@ -28,6 +36,8 @@ from coach.config import (
     load_config,
     read_token,
 )
+from coach.engine import EngineClient
+from coach.live import MODES, CoachSession, CoachSettings, engine_health_problems
 from coach.modinstall import (
     DLL_NAME,
     MANIFEST_NAME,
@@ -38,10 +48,23 @@ from coach.modinstall import (
 )
 from coach.runlog import RunLog
 from coach.saves import SaveError, backup, find_steam_dir, game_is_running, restore, seed_modded
+from coach.server import DEFAULT_PORT, HOST, Broadcaster, create_app, create_server
+from coach.view import CoachState, compose, sentence
+from coach.window import open_window
 
 DEFAULT_BACKUP_ROOT = Path.home() / "Documents" / "spire-coach-backups"
 DEFAULT_MOD_REPO = Path.home() / "Documents" / "git" / "STS2MCP"
 MOD_ID = "STS2_MCP"
+DEFAULT_WORKERS = 4  # the engine service's search workers (spec 5.3)
+DEFAULT_BUDGET_S = 1.5  # seconds of search per position (spec 5.3, 7.3)
+
+_SERVER_START_S = 10.0  # uvicorn listens well within this
+_SERVER_STOP_S = 5.0
+# How long one poll of the session can take before it sees it should stop: the mod's
+# 2 s timeout plus the 1 s wait between polls while the game is away, with room to spare.
+_POLL_S = 5.0
+# What stops the coach: Ctrl-C, a plain `kill`, the terminal closing.
+_STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 
 
 # --- doctor --------------------------------------------------------------------
@@ -293,7 +316,301 @@ def cmd_mod_enable(backup_root: Path, *, is_running: Callable[[], bool] = game_i
     return 0
 
 
+# --- coach -----------------------------------------------------------------------------
+
+
+class CoachError(Exception):
+    """The live coach could not start. The message is one line for the user."""
+
+
+def _wait_for_ctrl_c() -> None:
+    """Block until Ctrl-C (or SIGTERM or SIGHUP), which raises KeyboardInterrupt here."""
+    while True:
+        time.sleep(1.0)
+
+
+def _say(text: str, *, error: bool = False) -> None:
+    """One line for the user. A terminal that has gone away (a broken pipe) is no reason
+    to stop the coach, least of all while it is stopping."""
+    with contextlib.suppress(OSError):
+        print(text, file=sys.stderr if error else sys.stdout, flush=True)
+
+
+def cmd_coach(
+    config: Config,
+    *,
+    workers: int = DEFAULT_WORKERS,
+    budget_s: float = DEFAULT_BUDGET_S,
+    port: int = DEFAULT_PORT,
+    window: bool = True,
+    mode: str = "show",
+    engine_cmd: list[str] | None = None,
+    client_factory: Callable[[str, str | None], ModClient] | None = None,
+    show_window: Callable[[str], bool] | None = None,
+    wait_for_ctrl_c: Callable[[], None] | None = None,
+) -> int:
+    """Coach live until Ctrl-C, or until the panel's window is closed.
+
+    The engine service starts first and is health-checked. Then the panel's server and
+    the coach session each get a thread of their own, and the window takes the main
+    thread, as pywebview needs on macOS. When the window cannot open, the panel is one
+    browser tab away and the coach runs until Ctrl-C. SIGTERM (a plain `kill`) and SIGHUP
+    (the terminal closing) stop it as Ctrl-C does. `engine_cmd` replaces the engine
+    service's launch command; the last three keywords replace the mod client, the window
+    and the wait for Ctrl-C (tests use stand-ins).
+    """
+    settings = CoachSettings(
+        mode=mode,
+        time_budget_s=budget_s,
+        poll_interval_s=config.poll_interval_s,
+        engine_start_timeout_s=config.engine_start_timeout_s,
+    )
+    with _stop_signals_raise_keyboard_interrupt():
+        coach = _LiveCoach(
+            (client_factory or ModClient)(config.base_url, config.token),
+            EngineClient(engine_cmd, workers=workers),
+            settings,
+        )
+        try:
+            coach.start(config.data_dir, port)
+            url = f"http://{HOST}:{port}/"
+            _say(f"The coach panel is at {url}")
+            if window:
+                _say("Close the panel's window or press Ctrl-C to stop the coach.")
+                if (show_window or open_window)(url):
+                    return 0
+            _say("Press Ctrl-C to stop the coach.")
+            (wait_for_ctrl_c or _wait_for_ctrl_c)()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            coach.stop()
+    return 0
+
+
+class _LiveCoach:
+    """The live coach's parts: started in order by `start`, stopped in reverse by `stop`."""
+
+    def __init__(self, client: ModClient, engine: EngineClient, settings: CoachSettings) -> None:
+        self._client = client
+        self._engine = engine
+        self._settings = settings
+        self._stopping = threading.Event()
+        self._session: CoachSession | None = None
+        self._session_thread: threading.Thread | None = None
+        self._server: uvicorn.Server | None = None
+        self._server_thread: threading.Thread | None = None
+
+    def start(self, data_dir: Path, port: int) -> None:
+        _say("Starting the engine service…")
+        # A cold start of the service can take a while: this first check may wait for
+        # it. The session checks a failing engine again by itself.
+        problems = engine_health_problems(
+            self._engine, timeout_s=self._settings.engine_start_timeout_s
+        )
+        for problem in problems:
+            _say(
+                f"{sentence(f'Advice is off: {problem}')} Turn on the version override in "
+                "the panel to see advice anyway.",
+                error=True,
+            )
+        broadcaster = Broadcaster()
+        feed = _PanelFeed(_starting_state(self._settings), broadcaster)
+        self._session = CoachSession(
+            self._client,
+            self._engine,
+            publish=feed.publish,
+            data_dir=data_dir,
+            settings=self._settings,
+            engine_problems=problems,
+        )
+        app = create_app(feed.state, self._apply_settings, broadcaster=broadcaster)
+        self._server = create_server(app, port=port)
+        self._server_thread = _start_thread(_serve, self._server, name="coach-server")
+        _wait_until_listening(self._server, self._server_thread, port)
+        self._session_thread = _start_thread(
+            self._session.run, self._stopping.is_set, name="coach-session"
+        )
+
+    def stop(self) -> None:
+        """Stop whatever was started: the session first, so that no engine call is cut
+        off early, then the engine service, the panel's server and the mod client. Each
+        step runs even when one before it failed. Ctrl-C, SIGTERM and SIGHUP are ignored
+        meanwhile: every wait here is bounded, and one of them would cut stopping short
+        and could leave the engine service running."""
+        with _stop_signals_ignored(), contextlib.ExitStack() as then:
+            then.callback(self._client.close)
+            then.callback(self._stop_server)
+            then.callback(self._engine.close)
+            self._stop_session()
+
+    def _stop_session(self) -> None:
+        self._stopping.set()
+        if self._session_thread is None:
+            if self._session is not None:
+                self._session.close()  # its engine thread runs from the start
+            return
+        _say("Stopping the coach…")
+        # One poll to see the stop, then the session's own close waits for its engine
+        # thread.
+        bound = _POLL_S + self._session.close_timeout_s
+        self._session_thread.join(bound)
+        if self._session_thread.is_alive():
+            _say(
+                f"The coach session did not stop within {bound:.0f} s; closing the engine "
+                "service now, which cuts off any request it is still waiting on.",
+                error=True,
+            )
+
+    def _stop_server(self) -> None:
+        if self._server_thread is None:
+            return
+        self._server.should_exit = True
+        self._server_thread.join(_SERVER_STOP_S)
+        if self._server_thread.is_alive():
+            self._server.force_exit = True  # a panel that will not let go
+            self._server_thread.join(_SERVER_STOP_S)
+
+    def _apply_settings(self, update: dict) -> None:
+        """A settings update from the panel, already validated: the mode changes at once,
+        the override from the session's next poll (it reads the setting on every poll)."""
+        if "mode" in update:
+            self._session.set_mode(update["mode"])
+        if "override_versions" in update:
+            self._settings.override_versions = update["override_versions"]
+
+
+class _PanelFeed:
+    """The newest state for the panel's app to read, and the broadcaster that pushes each.
+
+    `publish` is the session's publish callback. It keeps each state BEFORE handing it
+    to the broadcaster (coach/server.py's contract): a panel that connects meanwhile
+    reads the state as its first one, or has it pushed; never neither.
+    """
+
+    def __init__(self, first: CoachState, broadcaster: Broadcaster) -> None:
+        self._state = first
+        self._broadcaster = broadcaster
+
+    def state(self) -> CoachState:
+        return self._state
+
+    def publish(self, state: CoachState) -> None:
+        self._state = state
+        self._broadcaster.publish(state)
+
+
+def _starting_state(settings: CoachSettings) -> CoachState:
+    """What the panel shows until the session's first poll: waiting for the game."""
+    return compose(
+        None,
+        connected=False,
+        bridge_problem=None,
+        internal_error=None,
+        versions=VersionStatus(ok=True, problems=[]),
+        override_versions=settings.override_versions,
+        mode=settings.mode,
+        last_grade=None,
+        run={"act": None, "floor": None},
+        fidelity_warnings=[],
+        engine_restarting=False,
+        z=settings.thresholds.z,
+        potion_value_hp=settings.potion_value_hp,
+    )
+
+
+def _start_thread(target: Callable[..., object], *args: object, name: str) -> threading.Thread:
+    # A daemon: a thread that failed to stop in time never keeps the process alive.
+    thread = threading.Thread(target=target, args=args, name=name, daemon=True)
+    thread.start()
+    return thread
+
+
+def _serve(server: uvicorn.Server) -> None:
+    """Run the panel's server until it is told to exit. When it cannot listen (the port
+    is taken) uvicorn leaves by SystemExit, and the caller sees it never started."""
+    with contextlib.suppress(SystemExit):
+        server.run()
+
+
+def _wait_until_listening(server: uvicorn.Server, thread: threading.Thread, port: int) -> None:
+    deadline = time.monotonic() + _SERVER_START_S
+    while not server.started:
+        if not thread.is_alive() or time.monotonic() > deadline:
+            raise CoachError(
+                f"The coach panel could not listen on {HOST}:{port}: is another coach "
+                "running? Choose another port with --port."
+            )
+        time.sleep(0.01)
+
+
+def _interrupt(signum: int, frame: object) -> None:
+    raise KeyboardInterrupt
+
+
+@contextlib.contextmanager
+def _stop_signals_raise_keyboard_interrupt() -> Iterator[None]:
+    """SIGTERM (a plain `kill`) and SIGHUP (the terminal closing) raise KeyboardInterrupt
+    on the main thread, as Ctrl-C does, so the coach stops in order. (With the window
+    open, coach/window.py makes them close the window instead.)"""
+    with _signal_handlers({signal.SIGTERM: _interrupt, signal.SIGHUP: _interrupt}):
+        yield
+
+
+@contextlib.contextmanager
+def _stop_signals_ignored() -> Iterator[None]:
+    with _signal_handlers(dict.fromkeys(_STOP_SIGNALS, signal.SIG_IGN)):
+        yield
+
+
+@contextlib.contextmanager
+def _signal_handlers(handlers: dict) -> Iterator[None]:
+    """Set these signal handlers for a while. Only the main thread may change signal
+    handling; on any other thread this does nothing."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous = {signum: signal.signal(signum, handler) for signum, handler in handlers.items()}
+    try:
+        yield
+    finally:
+        for signum, handler in previous.items():
+            if handler is None:  # not set from Python: its own default is the best guess
+                handler = signal.default_int_handler if signum == signal.SIGINT else signal.SIG_DFL
+            signal.signal(signum, handler)
+
+
 # --- argument parsing ------------------------------------------------------------------
+
+
+def _worker_count(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a whole number") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be at least 1, got {text}")
+    return value
+
+
+def _seconds(text: str) -> float:
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a number") from None
+    if not (math.isfinite(value) and value > 0):
+        raise argparse.ArgumentTypeError(f"must be a positive number of seconds, got {text}")
+    return value
+
+
+def _port(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a whole number") from None
+    if not 1 <= value <= 65535:
+        raise argparse.ArgumentTypeError(f"must be a port from 1 to 65535, got {text}")
+    return value
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -327,6 +644,39 @@ def _build_parser() -> argparse.ArgumentParser:
 
     enable_parser = mod_sub.add_parser("enable", help="enable the mod in settings.save")
     enable_parser.add_argument("--backup-root", type=Path, default=DEFAULT_BACKUP_ROOT)
+
+    coach_parser = subparsers.add_parser(
+        "coach", help="coach you live while you play, in a floating panel"
+    )
+    coach_parser.add_argument(
+        "--workers",
+        type=_worker_count,
+        default=DEFAULT_WORKERS,
+        help="search worker processes of the engine service (default: %(default)s)",
+    )
+    coach_parser.add_argument(
+        "--budget",
+        type=_seconds,
+        default=DEFAULT_BUDGET_S,
+        help="seconds of search per position (default: %(default)s)",
+    )
+    coach_parser.add_argument(
+        "--port",
+        type=_port,
+        default=DEFAULT_PORT,
+        help="the panel's port on 127.0.0.1 (default: %(default)s)",
+    )
+    coach_parser.add_argument(
+        "--no-window",
+        action="store_true",
+        help="no floating window: the terminal prints the panel's URL; open it in a browser tab",
+    )
+    coach_parser.add_argument(
+        "--mode",
+        choices=MODES,
+        default="show",
+        help="show the best move at once, or quiz: hide it until you move (default: %(default)s)",
+    )
 
     return parser
 
@@ -364,13 +714,22 @@ def main(argv: list[str] | None = None) -> int:
                 return cmd_mod_install(config, args.repo)
             if args.mod_command == "enable":
                 return cmd_mod_enable(args.backup_root)
+        if args.command == "coach":
+            return cmd_coach(
+                config,
+                workers=args.workers,
+                budget_s=args.budget,
+                port=args.port,
+                window=not args.no_window,
+                mode=args.mode,
+            )
     except BridgeAuthError as exc:
         print(str(exc), file=sys.stderr)
         return 2
     except BridgeError as exc:
         print(str(exc), file=sys.stderr)
         return 1
-    except (SaveError, InstallError) as exc:
+    except (SaveError, InstallError, CoachError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
     except OSError as exc:

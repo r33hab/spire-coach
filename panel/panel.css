@@ -1,0 +1,503 @@
+/* The coach panel. Dark, one column, readable at a glance beside the game.
+   Moves are set in a slab serif, the game's voice; everything the coach says is in the
+   system sans. Colour always means something: a grade, danger or a warning. */
+
+:root {
+  color-scheme: dark;
+
+  --night: #141c29;   /* background: the sky behind the Spire */
+  --stone: #222c3b;   /* rules and control tracks */
+  --stone-2: #313d4f; /* the path, hover */
+  --bone: #ede4cf;    /* primary text */
+  --ash: #939fb1;     /* secondary text */
+  --ash-dim: #6d798b; /* placeholders */
+  --ink: #16140f;     /* text on a coloured chip */
+
+  --best: #5cc98e;
+  --good: #a6cb6c;
+  --inaccuracy: #f1c350;
+  --mistake: #f08a3c;
+  --blunder: #e5574d;
+  --ungraded: #3a4658;
+  --caution: var(--inaccuracy);
+  --danger: var(--blunder);
+
+  --slab: Rockwell, "Rockwell Nova", "Roboto Slab", Charter, Georgia, serif;
+  --sans: system-ui, -apple-system, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+html,
+body {
+  background: var(--night);
+}
+
+body {
+  margin: 0;
+  color: var(--bone);
+  font: 14px/1.4 var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+p,
+ol,
+ul,
+dl,
+dd {
+  margin: 0;
+  padding: 0;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+:focus-visible {
+  outline: 2px solid var(--bone);
+  outline-offset: 2px;
+}
+
+.panel {
+  max-width: 26rem;
+  margin: 0 auto;
+  padding: 10px 16px 20px;
+}
+
+.label {
+  font-size: 12px;
+  color: var(--ash);
+}
+
+.move {
+  font-family: var(--slab);
+}
+
+.caution {
+  color: var(--caution);
+}
+
+/* --- the bar: where in the run, and the two switches --------------------------------- */
+
+.bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 32px;
+}
+
+.run {
+  font-size: 12px;
+  color: var(--ash);
+  white-space: nowrap;
+}
+
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.switch {
+  display: inline-flex;
+  padding: 2px;
+  border-radius: 7px;
+  background: var(--stone);
+}
+
+.switch button {
+  padding: 3px 11px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--ash);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.switch button[aria-pressed="true"] {
+  background: var(--bone);
+  color: var(--night);
+}
+
+.layout {
+  padding: 3px 9px;
+  border: 1px solid var(--stone-2);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ash);
+  font-size: 12px;
+}
+
+.switch button:not([aria-pressed="true"]):not(:disabled):hover,
+.layout:hover {
+  color: var(--bone);
+}
+
+/* --- the status line ------------------------------------------------------------------ */
+
+.status {
+  display: grid;
+  grid-template-columns: 8px 1fr;
+  column-gap: 8px;
+  align-items: start;
+  padding: 6px 0 10px;
+  border-bottom: 1px solid var(--stone);
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  margin-top: calc(0.7em - 4px); /* centred on the sentence's first line */
+  border-radius: 50%;
+  background: var(--ash);
+}
+
+.status-text {
+  min-width: 0;
+}
+
+[data-tone="advice"] .dot {
+  background: var(--best);
+}
+
+[data-tone="advice-caution"] .dot {
+  background: var(--caution);
+}
+
+[data-tone="thinking"] .dot,
+[data-tone="connecting"] .dot {
+  background: var(--bone);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+[data-tone="engine_restarting"] .dot,
+[data-tone="lost"] .dot {
+  background: var(--caution);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+[data-tone="advice_off"] .dot,
+[data-tone="error"] .dot {
+  background: var(--danger);
+}
+
+[data-tone="waiting_for_game"] .dot,
+[data-tone="idle"] .dot {
+  background: var(--ash-dim);
+}
+
+.override {
+  grid-column: 2;
+  justify-self: start;
+  margin-top: 6px;
+  padding: 3px 10px;
+  border: 1px solid var(--caution);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--caution);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.override:hover {
+  background: var(--caution);
+  color: var(--ink);
+}
+
+/* --- the last move's grade ------------------------------------------------------------ */
+
+.last {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--stone);
+}
+
+.last-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+}
+
+.chip {
+  display: inline-block;
+  padding: 1px 9px;
+  border-radius: 999px;
+  background: var(--ungraded);
+  color: var(--bone);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.chip[data-grade="best"] { background: var(--best); color: var(--ink); }
+.chip[data-grade="good"] { background: var(--good); color: var(--ink); }
+.chip[data-grade="inaccuracy"] { background: var(--inaccuracy); color: var(--ink); }
+.chip[data-grade="mistake"] { background: var(--mistake); color: var(--ink); }
+.chip[data-grade="blunder"] { background: var(--blunder); color: var(--ink); }
+
+.chip.fresh {
+  animation: arrive 240ms ease-out;
+}
+
+.last-played {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.last-detail {
+  margin-top: 6px;
+  color: var(--ash);
+}
+
+.last-detail .move {
+  color: var(--bone);
+}
+
+/* --- the best move: the one big thing ------------------------------------------------- */
+
+.advice {
+  padding: 12px 0 14px;
+}
+
+.advice-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.tag {
+  padding: 0 6px;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.best {
+  margin-top: 2px;
+  font-family: var(--slab);
+  line-height: 1.15;
+  overflow-wrap: break-word;
+}
+
+.best-name {
+  font-size: clamp(24px, 8.5vw, 32px);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+/* "→ Jaw Worm" stays in one piece: it moves to the next line whole, or not at all */
+.best-target {
+  display: inline-block;
+  max-width: 100%;
+  font-size: 21px;
+}
+
+.best.placeholder .best-name {
+  font-size: 21px;
+  font-weight: 400;
+  color: var(--ash-dim);
+}
+
+/* the rest of the turn: a dotted path, like the map's, from one move to the next */
+
+.then {
+  margin-top: 10px;
+}
+
+.path {
+  list-style: none;
+  margin: 4px 0 0 4px;
+  padding-left: 16px;
+  border-left: 2px dotted var(--stone-2);
+}
+
+.path li {
+  position: relative;
+  padding: 1px 0;
+  font-family: var(--slab);
+  font-size: 15px;
+  line-height: 1.35;
+}
+
+/* a node on the dotted line (its centre is 17px left of the item), on the first line */
+.path li::before {
+  content: "";
+  position: absolute;
+  top: calc(1px + 0.675em - 4px);
+  left: -21px;
+  width: 8px;
+  height: 8px;
+  border: 2px solid var(--ash);
+  border-radius: 50%;
+  background: var(--night);
+}
+
+.path li.more {
+  font-family: var(--sans);
+  font-size: 12px;
+  color: var(--ash);
+}
+
+.path li.more::before {
+  border-color: var(--stone-2);
+}
+
+.outcome {
+  display: flex;
+  gap: 32px;
+  margin-top: 12px;
+}
+
+.stat {
+  display: flex;
+  flex-direction: column-reverse;
+}
+
+.stat dt {
+  font-size: 12px;
+  color: var(--ash);
+}
+
+.stat dd {
+  font-size: 21px;
+  font-weight: 600;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+}
+
+.stat dd[data-level="caution"] {
+  color: var(--caution);
+}
+
+.stat dd[data-level="danger"] {
+  color: var(--danger);
+}
+
+.warnings {
+  list-style: none;
+  margin-top: 12px;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.warnings li {
+  padding: 1px 0 1px 10px;
+  border-left: 3px solid var(--caution);
+}
+
+.warnings li + li {
+  margin-top: 6px;
+}
+
+.warnings li.more {
+  border-left-color: transparent;
+  font-size: 12px;
+  color: var(--ash);
+}
+
+/* --- the other moves ------------------------------------------------------------------ */
+
+.others {
+  padding-top: 12px;
+  border-top: 1px solid var(--stone);
+}
+
+.others-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.alternatives {
+  list-style: none;
+  margin-top: 4px;
+}
+
+.alternatives li {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  column-gap: 12px;
+  align-items: baseline;
+  padding: 3px 0;
+}
+
+.alternatives .move {
+  font-size: 15px;
+  min-width: 0;
+  overflow-wrap: break-word;
+}
+
+.alternatives .cost {
+  font-size: 15px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.alternatives .risk {
+  grid-column: 1 / -1;
+  font-size: 12px;
+  color: var(--danger);
+}
+
+/* --- layouts and states --------------------------------------------------------------- */
+
+[data-layout="compact"] .expanded-only,
+[data-layout="expanded"] .compact-only {
+  display: none;
+}
+
+[data-layout="compact"] .advice {
+  padding-bottom: 8px;
+}
+
+/* No contact with the coach: what is shown may be out of date. */
+.stale .last,
+.stale .advice,
+.stale .others {
+  opacity: 0.45;
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.3;
+  }
+}
+
+@keyframes arrive {
+  from {
+    transform: scale(0.8);
+  }
+  to {
+    transform: scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}

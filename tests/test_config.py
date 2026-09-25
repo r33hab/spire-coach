@@ -84,3 +84,25 @@ def test_non_numeric_poll_interval_raises_a_clear_value_error(tmp_path):
         ValueError, match=r"invalid setting SPIRE_COACH_POLL_S=abc: must be a number"
     ):
         load_config({"SPIRE_COACH_MODS_DIR": str(tmp_path), "SPIRE_COACH_POLL_S": "abc"})
+
+
+# --- the engine service's startup timeout ---------------------------------------
+
+
+def test_the_engine_gets_90_s_to_start_by_default(tmp_path):
+    assert load_config({"SPIRE_COACH_MODS_DIR": str(tmp_path)}).engine_start_timeout_s == 90.0
+
+
+def test_the_engines_startup_timeout_comes_from_env(tmp_path):
+    cfg = load_config({"SPIRE_COACH_MODS_DIR": str(tmp_path), "SPIRE_COACH_ENGINE_START_S": "150"})
+    assert cfg.engine_start_timeout_s == 150.0
+
+
+@pytest.mark.parametrize("raw", ["abc", "0", "-5", "nan", "inf"])
+def test_an_invalid_engine_startup_timeout_raises_a_clear_value_error(tmp_path, raw):
+    with pytest.raises(
+        ValueError,
+        match=rf"^invalid setting SPIRE_COACH_ENGINE_START_S={raw}: "
+        r"must be a positive number of seconds$",
+    ):
+        load_config({"SPIRE_COACH_MODS_DIR": str(tmp_path), "SPIRE_COACH_ENGINE_START_S": raw})

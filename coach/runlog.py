@@ -1,8 +1,9 @@
-"""Append-only run log for capture mode.
+"""Append-only run log.
 
-One JSONL file per run, under ``<data_dir>/captures/``. Every ``append`` is a
-single, complete, flushed JSON line: ``{ts, kind, payload}``. Capture mode
-is the only writer; nothing ever rewrites a line once it's on disk.
+One JSONL file per run, under ``<data_dir>/<subdir>/``: ``captures/`` for capture
+mode (the default) and ``runs/`` for the live coach (spec 5.5). Every ``append`` is a
+single, complete, flushed JSON line: ``{ts, kind, payload}``. Nothing ever rewrites a
+line once it's on disk.
 """
 
 from __future__ import annotations
@@ -18,11 +19,17 @@ CAPTURES_DIRNAME = "captures"
 
 
 class RunLog:
-    def __init__(self, data_dir: Path, *, now: Callable[[], datetime] | None = None) -> None:
+    def __init__(
+        self,
+        data_dir: Path,
+        *,
+        now: Callable[[], datetime] | None = None,
+        subdir: str = CAPTURES_DIRNAME,
+    ) -> None:
         self._now = now or datetime.now
-        captures_dir = Path(data_dir) / CAPTURES_DIRNAME
-        captures_dir.mkdir(parents=True, exist_ok=True)
-        self.path = captures_dir / f"{_stamp(self._now())}.jsonl"
+        log_dir = Path(data_dir) / subdir
+        log_dir.mkdir(parents=True, exist_ok=True)
+        self.path = log_dir / f"{_stamp(self._now())}.jsonl"
 
     def append(self, kind: str, payload: dict) -> None:
         record = {"ts": self._now().isoformat(), "kind": kind, "payload": payload}

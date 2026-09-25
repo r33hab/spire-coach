@@ -27,6 +27,14 @@ def test_append_writes_one_json_line_with_ts_kind_and_payload(tmp_path):
     assert lines[0]["ts"] == NOW.isoformat()
 
 
+def test_a_subdirectory_can_replace_captures(tmp_path):
+    # The live coach logs under runs/ (spec 5.5); capture mode keeps the default.
+    log = RunLog(tmp_path, now=lambda: NOW, subdir="runs")
+    assert log.path == tmp_path / "runs" / "20260924-120000.jsonl"
+    assert log.path.parent.is_dir()
+    assert not (tmp_path / "captures").exists()
+
+
 def test_multiple_appends_produce_one_valid_json_object_per_line_in_order(tmp_path):
     log = RunLog(tmp_path, now=lambda: NOW)
     log.append("state", {"n": 1})
