@@ -15,11 +15,12 @@ coach/view.py; the background thread is coach/worker.py.
 Matching a move to its position. An action-log entry names no position, only a seq,
 and every state the mod reports carries `action_log_seq`, the newest seq at that
 moment. So each settled position is kept, with its live snapshot and its analysis, in
-a small bounded timeline together with the seq it was first seen at. The move with seq
-N was made from the last position seen at seq N - 1 (in the entry's act, floor and
-round); its "after" for the fidelity check is the very next settled position, if that
-one is still at seq N. A move whose position never settled on screen, or had no
-analysis, is Ungraded (Review Focus 1). Only human, in-combat moves are graded
+a small bounded timeline together with the seq it was first seen at, or no seq when
+that is ambiguous (see `_first_sight_seq`). The move with seq N was made from the last
+position seen at seq N - 1 (in the entry's act, floor and round); its "after" for the
+fidelity check is the very next settled position, if that one is still at seq N. A
+move whose position never settled on screen, or had no analysis, is Ungraded (Review
+Focus 1). Only human, in-combat moves are graded
 (Review Focus 3, ruling R4). A gap in the log (the game restarted, or entries were
 dropped) empties the timeline, so nothing is graded across it (ruling R5).
 
@@ -57,7 +58,6 @@ from coach.bridge.decisions import (
     Stabilizer,
     classify,
     fingerprint,
-    is_settled,
 )
 from coach.bridge.versions import VersionStatus, check_versions, read_game_version
 from coach.engine import Analysis, CheckResult, EngineClient, EngineError, EngineUnavailable, Move
@@ -147,7 +147,8 @@ class _Position:
 @dataclass(eq=False)
 class _Seen:
     """A settled position as it was seen, with the action log's newest seq at that
-    moment (the seq of the first poll that showed it)."""
+    moment (the seq of the first poll that showed it), or None when that is ambiguous:
+    no move is ever matched to a position without a seq."""
 
     seq: int | None
     position: _Position
@@ -207,8 +208,6 @@ class CoachSession:
             lambda job, outcome: self._results.put((job, outcome)), name="coach-engine"
         )
         self._stabilizer = Stabilizer()
-        self._streak_fingerprint: str | None = None
-        self._streak_seq: int | None = None
 
         self._mode = settings.mode
         self._connected = False
@@ -278,16 +277,30 @@ class CoachSession:
     def _on_state(self, state: dict) -> None:
         self._connected = True
         self._bridge_problem = None
-        # The seq a position is kept with is the one of the first poll that showed it:
-        # a move clicked between that poll and the one that settles it is not yet on
-        # screen, but already in the log.
-        key = fingerprint(state) if is_settled(state) else None
-        if key != self._streak_fingerprint:
-            self._streak_fingerprint = key
-            self._streak_seq = _int_or_none(state.get("action_log_seq"))
         settled = self._stabilizer.feed(state)
         if settled is not None:
-            self._on_settled(settled, self._streak_seq)
+            self._on_settled(settled, self._first_sight_seq())
+
+    def _first_sight_seq(self) -> int | None:
+        """The action-log seq the position just settled is kept with, or None.
+
+        It is the seq of the first poll that showed the position, not of the poll that
+        settled it: a move clicked between those two polls is in the log before it is
+        on screen. But when the log had already moved on since the poll before that
+        first one, a move came in before the coach first saw the position, and nothing
+        tells whether the position is that move's result or the one it was made from
+        (its first poll can read a seq one too high). Such a position gets no seq, so no
+        move is ever matched to it and no fidelity check starts or ends at it (review
+        Important 1): a few moves go ungraded rather than any being graded on the wrong
+        analysis. Nothing polled before it (the session's first position) is no evidence
+        of a move, so that one keeps its seq.
+        """
+        first = _int_or_none(self._stabilizer.streak_first.get("action_log_seq"))
+        before = self._stabilizer.before_streak
+        before_seq = _int_or_none(before.get("action_log_seq")) if before is not None else None
+        if first is not None and before_seq is not None and first > before_seq:
+            return None
+        return first
 
     def _on_settled(self, state: dict, seq: int | None) -> None:
         decision = classify(state)
@@ -494,6 +507,7 @@ class CoachSession:
         if (
             previous.position.decision.kind is not DecisionKind.COMBAT_SELECT
             or seen.position is previous.position  # the same screen again: no pick yet
+            or previous.seq is None  # when the screen came up is not known
             or seen.seq != previous.seq  # a move came in between: the diff would mix them
             or self._sources.get(previous.seq) == "api"  # the api is playing, not the player
         ):

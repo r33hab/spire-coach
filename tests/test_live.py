@@ -359,6 +359,9 @@ def p1_analysis(live):
 
 
 def p2_analysis(live):
+    if "c4" not in hand_uids(live):  # True Grit is gone too: only the turn's end is left
+        end = end_turn()
+        return analysis_of([end], best=end)
     grit = card(live, "c4")
     return analysis_of([grit, end_turn(diff=4.0)], best=grit)
 
@@ -401,6 +404,15 @@ def settle(session, bridge, state):
     bridge.state = state
     session.step()
     session.step()
+
+
+def act(session, bridge, entry, then):
+    """The player makes the move `entry` logs: the screen shows it resolving for a poll
+    (the log already has it), and then the position `then` settles."""
+    bridge.entries.append(entry)
+    bridge.state = resolving(bridge.state, entry["seq"])
+    session.step()
+    settle(session, bridge, then)
 
 
 def step_until(session, condition, timeout=5.0):
@@ -581,8 +593,7 @@ def test_a_failed_fidelity_check_is_a_warning_and_a_not_comparable_one_writes_no
     settle(session, bridge, combat(seq=12))
     step_until(session, advising(published))
 
-    bridge.entries.append(play(13, "c1", "JAW_WORM_0"))
-    settle(session, bridge, combat(seq=13, hand=P1_HAND))
+    act(session, bridge, play(13, "c1", "JAW_WORM_0"), combat(seq=13, hand=P1_HAND))
     step_until(
         session,
         lambda: advising(published, "c2")() and latest(published).recommendation["warnings"],
@@ -595,8 +606,7 @@ def test_a_failed_fidelity_check_is_a_warning_and_a_not_comparable_one_writes_no
 
     # The simulator can't compare this one (unmodelled content): no gap report, but
     # the check's own warning reaches the panel too.
-    bridge.entries.append(play(14, "c2"))
-    settle(session, bridge, combat(seq=14, hand=P2_HAND))
+    act(session, bridge, play(14, "c2"), combat(seq=14, hand=P2_HAND))
     step_until(session, lambda: len(run_log(tmp_path, "check")) == 2)
     step_until(session, advising(published, "c4"))
     assert not (tmp_path / "gaps").exists()
@@ -620,8 +630,7 @@ def test_a_mismatch_warning_stays_up_for_ten_moves_then_clears(make_session):
     session, published = make_session(bridge, engine)
     settle(session, bridge, combat(seq=12))
     step_until(session, advising(published))
-    bridge.entries.append(play(13, "c1", "JAW_WORM_0"))
-    settle(session, bridge, combat(seq=13, hand=P1_HAND))
+    act(session, bridge, play(13, "c1", "JAW_WORM_0"), combat(seq=13, hand=P1_HAND))
     step_until(
         session,
         lambda: advising(published, "c2")() and latest(published).recommendation["warnings"],
@@ -687,10 +696,8 @@ def test_the_newest_position_is_analyzed_next_ahead_of_older_queued_ones(make_se
     session, published = make_session(bridge, engine)
 
     settle(session, bridge, combat(seq=12))
-    bridge.entries.append(play(13, "c1", "JAW_WORM_0"))
-    settle(session, bridge, combat(seq=13, hand=P1_HAND))
-    bridge.entries.append(play(14, "c2"))
-    settle(session, bridge, combat(seq=14, hand=P2_HAND))
+    act(session, bridge, play(13, "c1", "JAW_WORM_0"), combat(seq=13, hand=P1_HAND))
+    act(session, bridge, play(14, "c2"), combat(seq=14, hand=P2_HAND))
     bridge.entries.append(end_turn_entry(15))  # made from P2
     session.step()
     release_p0.set()
@@ -734,6 +741,42 @@ def test_a_move_clicked_between_the_two_polls_that_settle_a_position_is_matched_
 # --- Review Focus 3: several actions between two polls --------------------------------
 
 
+def test_a_position_first_seen_after_the_log_moved_on_is_never_bound_to_a_move(make_session):
+    # Review Important 1 (the reviewer's reproduction). P1 appears after Strike, but
+    # Whirlwind is clicked before the coach first polls it and P1 stays on screen for
+    # both settling polls, so its first poll already reads the log at 14. From the
+    # coach's side P1 could be the position before Whirlwind or the one after it:
+    # recorded at 14, True Grit (played from P2, after Whirlwind) would be graded on
+    # P1's analysis and fidelity-checked from P1.
+    bridge = FakeBridge()
+    engine = FakeEngine(standard_analysis)
+    session, published = make_session(bridge, engine)
+    p0 = combat(seq=12)
+    settle(session, bridge, p0)
+    step_until(session, advising(published, "c4"))
+
+    bridge.entries.append(play(13, "c1", "JAW_WORM_0"))  # Strike, seen resolving
+    bridge.state = resolving(p0, seq=13)
+    session.step()
+
+    bridge.entries.append(play(14, "c2"))  # Whirlwind, clicked before P1's first poll
+    settle(session, bridge, combat(seq=14, hand=P1_HAND, energy=1, jaw_worm_hp=24))
+
+    # Whirlwind resolves into P2, which never settles; True Grit is played from P2.
+    bridge.entries.append(play(15, "c4"))
+    bridge.state = resolving(combat(seq=15, hand=P2_HAND, energy=0, jaw_worm_hp=20), seq=15)
+    session.step()
+    step_until(session, lambda: len(grade_history(published)) == 3)
+
+    # P3, after True Grit, settles.
+    settle(session, bridge, combat(seq=15, hand=("c3",), energy=0, jaw_worm_hp=20))
+    step_until(session, advising(published))
+
+    graded = [(g["played"]["card_uid"], g["label"]) for g in grade_history(published)]
+    assert graded == [("c1", "Inaccuracy"), ("c2", "Ungraded"), ("c4", "Ungraded")]
+    assert engine.check_calls == []  # nothing is checked from P1, nor into it
+
+
 def test_two_moves_read_in_one_poll_are_each_graded_on_their_own_position_in_order(
     make_session, tmp_path
 ):
@@ -742,10 +785,12 @@ def test_two_moves_read_in_one_poll_are_each_graded_on_their_own_position_in_ord
     settle(session, bridge, combat(seq=12))
     step_until(session, advising(published, "c4"))
 
-    # Strike, then Whirlwind. Both positions settle on screen, but the action log
-    # hands over the two moves in a single read.
+    # Strike, then Whirlwind. Both positions settle on screen (Strike seen resolving
+    # in between), but the action log hands over the two moves in a single read.
     bridge.visible_up_to = 12
     bridge.entries += [play(13, "c1", "JAW_WORM_0"), play(14, "c2")]
+    bridge.state = resolving(bridge.state, seq=13)
+    session.step()
     settle(session, bridge, combat(seq=13, hand=P1_HAND))
     step_until(session, advising(published, "c2"))
     assert latest(published).last_grade is None
@@ -1097,9 +1142,8 @@ def test_an_in_combat_choose_a_card_is_analyzed_with_the_fights_room_type_and_gr
     settle(session, bridge, p0)
     step_until(session, advising(published))
 
-    bridge.entries.append(use_potion(13, 1))
     screen = choose_a_card(p0, seq=13)
-    settle(session, bridge, screen)
+    act(session, bridge, use_potion(13, 1), screen)
     step_until(
         session, lambda: latest(published).status == "advice" and len(engine.analyze_calls) == 2
     )
