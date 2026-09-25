@@ -36,6 +36,8 @@ def stat(**overrides) -> MoveStat:
         paired_death_diff_vs_best=0.0,
         paired_death_diff_stderr=0.0,
         hand_indices=[],
+        potion_slots=(),
+        select_indices=(),
     )
     fields.update(overrides)
     return MoveStat(**fields)

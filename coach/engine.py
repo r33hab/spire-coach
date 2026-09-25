@@ -74,14 +74,18 @@ class Move:
 @dataclass(frozen=True)
 class MoveStat(Move):
     visits: int
-    value_mean: float
-    p_death: float
+    value_mean: float | None  # null from the service when no data backs it (NaN, inf)
+    p_death: float | None
     paired_diff_vs_best: float | None
     paired_diff_stderr: float | None
     paired_n: int
     paired_death_diff_vs_best: float | None
     paired_death_diff_stderr: float | None
+    # Every live hand index / belt slot / candidate index this move covers: the search
+    # merges identical cards, potions and picks into one move that keeps the lowest one.
     hand_indices: list[int]
+    potion_slots: tuple[int, ...]
+    select_indices: tuple[int, ...]
 
 
 @dataclass(frozen=True)
@@ -143,6 +147,8 @@ def _move_stat_from_dict(data: dict) -> MoveStat:
         paired_death_diff_vs_best=data.get("paired_death_diff_vs_best"),
         paired_death_diff_stderr=data.get("paired_death_diff_stderr"),
         hand_indices=list(data["hand_indices"]),
+        potion_slots=tuple(data["potion_slots"]),
+        select_indices=tuple(data["select_indices"]),
     )
 
 

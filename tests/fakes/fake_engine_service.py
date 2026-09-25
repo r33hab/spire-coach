@@ -33,6 +33,9 @@ every request so a test can steer a running instance, or steer what a
       Every response carries an id that does not match its request, so a
       test can prove the client detects a desynced pipe instead of quietly
       pairing a response with the wrong request.
+  {"null_stats": true}
+      analyze's move statistics carry null for value_mean and p_death, as the
+      real service sends a statistic with no data behind it (NaN, inf).
 
 A missing or unreadable control file means no special behavior: every
 request gets its canned result. Every request also logs one line to
@@ -59,7 +62,7 @@ def _write_control(path: Path, control: dict) -> None:
     path.write_text(json.dumps(control), encoding="utf-8")
 
 
-def _canned_result(method: str) -> dict | None:
+def _canned_result(method: str, control: dict) -> dict | None:
     move = {
         "kind": "card",
         "card_index": 0,
@@ -82,7 +85,11 @@ def _canned_result(method: str) -> dict | None:
         "paired_death_diff_vs_best": 0.0,
         "paired_death_diff_stderr": 0.01,
         "hand_indices": [0],
+        "potion_slots": [],
+        "select_indices": [],
     }
+    if control.get("null_stats"):
+        move_stat.update(value_mean=None, p_death=None)
     results = {
         "health": {
             "service_version": "test-1",
@@ -157,7 +164,7 @@ def main() -> None:
         if ok_false is not None:
             response = {"id": req_id, "ok": False, "error": ok_false}
         else:
-            result = _canned_result(method)
+            result = _canned_result(method, control)
             if result is None:
                 response = {
                     "id": req_id,

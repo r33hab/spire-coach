@@ -51,6 +51,13 @@ def make_stat(**overrides) -> MoveStat:
         hand_indices=[0],
     )
     base.update(overrides)
+    # A move that merges nothing covers only its own potion slot / candidate index.
+    base.setdefault(
+        "potion_slots", (base["potion_slot"],) if base["potion_slot"] is not None else ()
+    )
+    base.setdefault(
+        "select_indices", (base["select_index"],) if base["select_index"] is not None else ()
+    )
     return MoveStat(**base)
 
 
@@ -459,6 +466,27 @@ def test_identify_move_maps_a_potion_by_slot_and_target():
     assert result is fire_on_jaw_worm
 
 
+def test_identify_move_maps_the_second_of_two_identical_potions_to_their_merged_move():
+    # The search merges identical potions into one move that keeps the lowest slot
+    # and lists every slot it covers; the player drank the copy in slot 2.
+    two_fire_potions = make_stat(
+        kind="potion",
+        card_index=None,
+        card_uid=None,
+        card_id=None,
+        potion_slot=0,
+        potion_slots=(0, 2),
+        potion_id="FIRE_POTION",
+        target="JAW_WORM_0",
+        hand_indices=[],
+        label="Fire Potion -> Jaw Worm",
+    )
+    analysis = make_analysis([two_fire_potions], best=OTHER_BEST)
+    entry = {"kind": "use_potion", "round": 2, "slot": 2, "target": "JAW_WORM_0"}
+
+    assert identify_move(entry, make_hand(), analysis) is two_fire_potions
+
+
 # --- identify_move: end_turn ---------------------------------------------------
 
 
@@ -563,6 +591,57 @@ def test_grade_selection_identifies_the_candidate_that_left_the_hand():
 
     assert result is not None
     assert result.played is chosen
+
+
+def test_grade_selection_maps_the_other_of_two_identical_picks_to_their_merged_move():
+    strike_a = make_card("s-a", card_id="STRIKE_IRONCLAD")
+    strike_b = make_card("s-b", card_id="STRIKE_IRONCLAD")
+    defend = make_card("d-a", card_id="DEFEND_IRONCLAD")
+    pre_live = {
+        "hand": [strike_a, strike_b, defend],
+        "draw_pile": [],
+        "discard_pile": [],
+        "exhaust_pile": [],
+        "pending_selection": {
+            "kind": "HAND",
+            "candidates": [strike_a, strike_b, defend],
+            "min": 1,
+            "max": 1,
+            "can_skip": False,
+        },
+    }
+    post_live = {
+        "hand": [strike_a, defend],
+        "draw_pile": [],
+        "discard_pile": [],
+        "exhaust_pile": [],
+    }
+    # One merged move for both Strikes: it keeps index 0 and lists both indices.
+    either_strike = make_stat(
+        kind="select",
+        card_index=None,
+        card_uid=None,
+        card_id=None,
+        select_index=0,
+        select_indices=(0, 1),
+        hand_indices=[],
+        label="Select Strike",
+    )
+    pick_defend = make_stat(
+        kind="select",
+        card_index=None,
+        card_uid=None,
+        card_id=None,
+        select_index=2,
+        hand_indices=[],
+        label="Select Defend",
+    )
+    analysis = make_analysis([either_strike, pick_defend], best=OTHER_BEST)
+
+    result = grade_selection(pre_live, post_live, analysis)
+
+    assert result is not None
+    assert result.played is either_strike  # the player took the second Strike
 
 
 def test_grade_selection_returns_none_without_a_pending_selection():

@@ -142,6 +142,8 @@ def test_move_stat_is_frozen_and_carries_every_paired_stat():
         paired_death_diff_vs_best=0.0,
         paired_death_diff_stderr=0.02,
         hand_indices=[0, 2],
+        potion_slots=(),
+        select_indices=(),
     )
     with pytest.raises(dataclasses.FrozenInstanceError):
         stat.visits = 20
@@ -192,6 +194,20 @@ def test_analyze_round_trips_to_an_analysis_of_moves(tmp_path):
     assert result.moves[0].visits == 100
     assert result.moves[0].paired_n == 50
     assert result.moves[0].hand_indices == [0]
+    assert result.moves[0].potion_slots == ()
+    assert result.moves[0].select_indices == ()
+
+
+def test_analyze_reads_a_null_value_mean_and_p_death_as_none(tmp_path):
+    # The service sends a statistic with no data behind it (NaN, inf) as null.
+    client = make_client(tmp_path, control={"null_stats": True})
+    try:
+        result = client.analyze({"some": "live-snapshot"})
+    finally:
+        client.close()
+
+    assert result.moves[0].value_mean is None
+    assert result.moves[0].p_death is None
 
 
 def test_analyze_passes_time_budget_seed_and_the_r2_search_params_through(tmp_path):

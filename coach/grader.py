@@ -14,7 +14,9 @@ the best move against itself).
 card uids (`play_card`) or the potion slot (`use_potion`) plus the entry's
 target -- never the search's own best-target guess, so a card played on the
 wrong enemy is graded against the child for that target, not the best
-one. `grade_selection` does the same job for an in-combat selection
+one. Both go through the lists of every hand index / belt slot a merged move
+covers, so a copy of an identical card or potion finds the merged move too.
+`grade_selection` does the same job for an in-combat selection
 (hand/grid/choose-a-card, or a skip), which the mod does not log as an
 action: a hand/grid pick is found by diffing which candidate left the hand
 or a pile between two live snapshots; a choose-a-card pick, whose freshly
@@ -203,7 +205,7 @@ def identify_move(action_entry: dict, pre_live: dict, analysis: Analysis) -> Mov
             (
                 m
                 for m in analysis.moves
-                if m.kind == "potion" and m.potion_slot == slot and m.target == target
+                if m.kind == "potion" and slot in m.potion_slots and m.target == target
             ),
             None,
         )
@@ -242,15 +244,21 @@ def _departed_candidate_index(
 
 
 def _select_child(indices: list[int], analysis: Analysis) -> MoveStat | None:
-    """The analyzed "select" child at any of these candidate indices.
+    """The analyzed "select" child covering any of these candidate indices.
 
-    A caller may pass several tied indices (identical merged CHOOSE
-    candidates): the search keeps only one of them as the merged child's own
-    `select_index`, so every tied index is searched and whichever one is
-    actually present wins.
+    The search merges identical candidates into one child that keeps the lowest
+    index and lists every index it covers in `select_indices`, so the pick is
+    found through that list. A caller may pass several tied indices (identical
+    CHOOSE candidates, matched by id rather than uid): any of them names the
+    same merged child.
     """
     return next(
-        (m for m in analysis.moves if m.kind == "select" and m.select_index in indices), None
+        (
+            m
+            for m in analysis.moves
+            if m.kind == "select" and any(index in m.select_indices for index in indices)
+        ),
+        None,
     )
 
 

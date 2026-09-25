@@ -259,6 +259,8 @@ def _stat(kind, *, label, diff=0.0, stderr=0.0, n=50, death=0.0, value=50.0, p_d
         target=None,
         select_index=None,
         hand_indices=[],
+        potion_slots=(),
+        select_indices=(),
     )
     fields.update(move)
     return MoveStat(
@@ -299,12 +301,18 @@ def end_turn(**stats):
 def potion(slot, potion_id, target=None, **stats):
     label = f"{potion_id} → {target}" if target else potion_id
     return _stat(
-        "potion", label=label, potion_slot=slot, potion_id=potion_id, target=target, **stats
+        "potion",
+        label=label,
+        potion_slot=slot,
+        potion_slots=(slot,),
+        potion_id=potion_id,
+        target=target,
+        **stats,
     )
 
 
 def select(index, label, **stats):
-    return _stat("select", label=label, select_index=index, **stats)
+    return _stat("select", label=label, select_index=index, select_indices=(index,), **stats)
 
 
 def skip(**stats):
