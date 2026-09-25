@@ -9,8 +9,8 @@ reads the mod's action log: each in-combat move a human made is graded against t
 analysis of the position it was made from, and once the next position settles, the
 move is fidelity-checked (`engine.check`) in the background, with any mismatch written
 to `<data_dir>/gaps/<ts>.json`. States, moves, analyses, grades and checks all go to
-the run log. What the panel shows is built by coach/view.py; the background thread is
-coach/worker.py.
+the run log, `<data_dir>/runs/<stamp>.jsonl`. What the panel shows is built by
+coach/view.py; the background thread is coach/worker.py.
 
 Matching a move to its position. An action-log entry names no position, only a seq,
 and every state the mod reports carries `action_log_seq`, the newest seq at that
@@ -201,7 +201,7 @@ class CoachSession:
         self._publish = publish
         self._data_dir = Path(data_dir)
         self._settings = settings
-        self._runlog = RunLog(self._data_dir)
+        self._runlog = RunLog(self._data_dir, subdir="runs")  # spec 5.5
         self._results: queue.SimpleQueue = queue.SimpleQueue()
         self._worker = Worker(
             lambda job, outcome: self._results.put((job, outcome)), name="coach-engine"

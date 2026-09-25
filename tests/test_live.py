@@ -437,7 +437,7 @@ def grade_history(published):
 
 
 def run_log(tmp_path, kind):
-    [path] = (tmp_path / "captures").glob("*.jsonl")
+    [path] = (tmp_path / "runs").glob("*.jsonl")  # the live coach's run log (spec 5.5)
     lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
     return [line["payload"] for line in lines if line["kind"] == kind]
 
