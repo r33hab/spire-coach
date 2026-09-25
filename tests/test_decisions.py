@@ -47,6 +47,16 @@ def hand_select_state():
 
 
 @pytest.fixture
+def card_select_grid_in_combat_state():
+    return load("state_card_select_in_combat.json")
+
+
+@pytest.fixture
+def card_select_choose_in_combat_state():
+    return load("state_card_select_choose_in_combat.json")
+
+
+@pytest.fixture
 def non_combat_state():
     return load("state_non_combat.json")
 
@@ -99,6 +109,19 @@ def test_hand_select_is_not_settled_while_resolving(hand_select_state):
     assert is_settled(state) is False
 
 
+def test_in_combat_card_select_is_settled_when_not_resolving(card_select_grid_in_combat_state):
+    # Settling rules match hand_select's: battle.is_play_phase being false
+    # must not matter (task-11b requirement 2).
+    assert card_select_grid_in_combat_state["battle"]["is_play_phase"] is False
+    assert is_settled(card_select_grid_in_combat_state) is True
+
+
+def test_in_combat_card_select_is_not_settled_while_resolving(card_select_grid_in_combat_state):
+    state = copy.deepcopy(card_select_grid_in_combat_state)
+    state["is_resolving"] = True
+    assert is_settled(state) is False
+
+
 def test_non_combat_state_is_settled_when_not_resolving(non_combat_state):
     assert is_settled(non_combat_state) is True
 
@@ -126,9 +149,45 @@ def test_combat_states_classify_as_combat(monster_state, state_type):
     )
 
 
-def test_hand_select_classifies_as_hand_select(hand_select_state):
+def test_hand_select_classifies_as_combat_select(hand_select_state):
     assert classify(hand_select_state) == Decision(
-        kind=DecisionKind.HAND_SELECT, state_type="hand_select", room_type=None
+        kind=DecisionKind.COMBAT_SELECT, state_type="hand_select", room_type=None
+    )
+
+
+def test_in_combat_card_select_grid_classifies_as_combat_select(card_select_grid_in_combat_state):
+    assert card_select_grid_in_combat_state["in_combat"] is True
+    assert classify(card_select_grid_in_combat_state) == Decision(
+        kind=DecisionKind.COMBAT_SELECT, state_type="card_select", room_type=None
+    )
+
+
+def test_in_combat_card_select_choose_classifies_as_combat_select(
+    card_select_choose_in_combat_state,
+):
+    assert card_select_choose_in_combat_state["in_combat"] is True
+    assert classify(card_select_choose_in_combat_state) == Decision(
+        kind=DecisionKind.COMBAT_SELECT, state_type="card_select", room_type=None
+    )
+
+
+def test_card_select_with_in_combat_false_classifies_as_non_combat(
+    card_select_grid_in_combat_state,
+):
+    state = copy.deepcopy(card_select_grid_in_combat_state)
+    state["in_combat"] = False
+    assert classify(state) == Decision(
+        kind=DecisionKind.NON_COMBAT, state_type="card_select", room_type=None
+    )
+
+
+def test_card_select_without_in_combat_key_classifies_as_non_combat(
+    card_select_grid_in_combat_state,
+):
+    state = copy.deepcopy(card_select_grid_in_combat_state)
+    del state["in_combat"]
+    assert classify(state) == Decision(
+        kind=DecisionKind.NON_COMBAT, state_type="card_select", room_type=None
     )
 
 

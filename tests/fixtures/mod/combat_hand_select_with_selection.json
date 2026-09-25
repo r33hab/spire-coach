@@ -1,0 +1,82 @@
+{
+  "state_type": "hand_select",
+  "mod_version": "0.5.0",
+  "mod_commit": "032ebde",
+  "schema_version": 5,
+  "rooms_entered": 3,
+  "action_log_seq": 20,
+  "is_resolving": false,
+  "in_combat": true,
+  "run": {"act": 1, "floor": 6, "ascension": 0},
+  "battle": {
+    "round": 3,
+    "turn": "player",
+    "is_play_phase": false,
+    "enemies": [
+      {
+        "entity_id": "JAW_WORM_0",
+        "combat_id": 42,
+        "name": "Jaw Worm",
+        "alive": true,
+        "hp": 30,
+        "max_hp": 44,
+        "block": 0,
+        "status": [],
+        "intents": [],
+        "move_id": "UNSET_MOVE",
+        "is_stunned": false,
+        "state_log": [],
+        "slot": 0,
+        "ai_fields": {}
+      }
+    ],
+    "allies": [],
+    "history": {"cards_played_this_turn": 1, "cards_played_this_combat": 6}
+  },
+  "hand_select": {
+    "mode": "simple_select",
+    "prompt": "Select a card to Exhaust.",
+    "cards": [
+      {"index": 0, "uid": "DEFEND_IRONCLAD#3", "id": "DEFEND_IRONCLAD", "name": "Defend", "type": "Skill", "cost": "1", "star_cost": null, "description": "Gain 5 Block.", "is_upgraded": false, "keywords": [], "enchantment": null, "affliction": null, "fields": {}, "unplayable": false},
+      {"index": 1, "uid": "STRIKE_IRONCLAD#2", "id": "STRIKE_IRONCLAD", "name": "Strike", "type": "Attack", "cost": "1", "star_cost": null, "description": "Deal 6 damage.", "is_upgraded": true, "keywords": [], "enchantment": null, "affliction": null, "fields": {}, "unplayable": false}
+    ],
+    "selected_cards": [{"index": 0, "name": "Defend"}],
+    "can_confirm": true,
+    "selection": {
+      "kind": "HAND",
+      "pile": null,
+      "prompt_key": "card_selection.TO_EXHAUST",
+      "source": {"type": "card", "id": "BURNING_PACT", "uid": "BURNING_PACT#0"},
+      "min": 1,
+      "max": 1,
+      "can_skip": false,
+      "selected": [{"uid": "DEFEND_IRONCLAD#3", "id": "DEFEND_IRONCLAD"}]
+    }
+  },
+  "player": {
+    "character_id": "IRONCLAD",
+    "character": "The Ironclad",
+    "hp": 70,
+    "max_hp": 80,
+    "block": 0,
+    "gold": 99,
+    "energy": 1,
+    "max_energy": 3,
+    "hand": [
+      {"index": 0, "uid": "DEFEND_IRONCLAD#3", "id": "DEFEND_IRONCLAD", "name": "Defend", "type": "Skill", "cost": "1", "star_cost": null, "description": "Gain 5 Block.", "rarity": "Common", "target_type": "Self", "can_play": true, "unplayable_reason": null, "is_upgraded": false, "is_upgradable": true, "upgrade_level": 0, "max_upgrade_level": 1, "keywords": [], "enchantment": null, "affliction": null, "fields": {}, "unplayable": false},
+      {"index": 1, "uid": "STRIKE_IRONCLAD#2", "id": "STRIKE_IRONCLAD", "name": "Strike", "type": "Attack", "cost": "1", "star_cost": null, "description": "Deal 6 damage.", "rarity": "Basic", "target_type": "AnyEnemy", "can_play": true, "unplayable_reason": null, "is_upgraded": true, "is_upgradable": false, "upgrade_level": 1, "max_upgrade_level": 1, "keywords": [], "enchantment": null, "affliction": null, "fields": {}, "unplayable": false}
+    ],
+    "draw_pile": [],
+    "discard_pile": [],
+    "exhaust_pile": [],
+    "play_pile": [
+      {"uid": "BURNING_PACT#0", "name": "Burning Pact", "cost": "1", "star_cost": null, "description": "Exhaust 1 card. Draw 2 cards.", "id": "BURNING_PACT", "is_upgraded": false, "upgrade_level": 0, "enchantment": null, "affliction": null, "fields": {}, "unplayable": false}
+    ],
+    "status": [],
+    "relics": [],
+    "potions": [],
+    "max_potion_slots": 3,
+    "deck_count": 10,
+    "deck": []
+  }
+}

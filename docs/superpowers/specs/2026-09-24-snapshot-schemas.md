@@ -99,6 +99,7 @@ Adapter rule for the coach (`coach/snapshot.py`): translate whatever raw per-car
   "source_card": "BURNING_PACT",// id of the card whose effect opened the selection; null if not a card or unknown
   "source_potion": null,        // id of the potion that opened it, else null
   "source_relic": null,         // id of the relic that opened it, else null
+  "played_card": null,          // the full Card in the game's Play pile whose effect opened this (mod player.play_pile matched by selection.source.uid); null when a potion/relic opened it or the mod has no play_pile
   "candidates": [Card],         // selectable cards in on-screen order (generated cards for CHOOSE)
   "min": 1, "max": 1,
   "can_skip": false,            // the screen offers a skip / confirm-with-none

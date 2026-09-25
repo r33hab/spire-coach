@@ -1,0 +1,81 @@
+{
+  "state_type": "card_select",
+  "mod_version": "0.5.0",
+  "mod_commit": "032ebde",
+  "schema_version": 5,
+  "rooms_entered": 3,
+  "action_log_seq": 22,
+  "is_resolving": false,
+  "in_combat": true,
+  "run": {"act": 1, "floor": 6, "ascension": 0},
+  "battle": {
+    "round": 2,
+    "turn": "player",
+    "is_play_phase": false,
+    "enemies": [
+      {
+        "entity_id": "JAW_WORM_0",
+        "combat_id": 42,
+        "name": "Jaw Worm",
+        "alive": true,
+        "hp": 30,
+        "max_hp": 44,
+        "block": 0,
+        "status": [],
+        "intents": [],
+        "move_id": "UNSET_MOVE",
+        "is_stunned": false,
+        "state_log": [],
+        "slot": 0,
+        "ai_fields": {}
+      }
+    ],
+    "allies": [],
+    "history": {}
+  },
+  "card_select": {
+    "screen_type": "choose",
+    "prompt": "Choose a card to add to your hand.",
+    "cards": [
+      {"index": 0, "uid": "BLUDGEON#0", "id": "BLUDGEON", "name": "Bludgeon", "type": "Attack", "cost": "3", "star_cost": null, "description": "Deal 32 damage.", "rarity": "Rare", "is_upgraded": false, "keywords": [], "enchantment": null, "affliction": null, "fields": {}, "unplayable": false},
+      {"index": 1, "uid": "UPPERCUT#0", "id": "UPPERCUT", "name": "Uppercut", "type": "Attack", "cost": "2", "star_cost": null, "description": "Deal 13 damage. Apply 1 Weak. Apply 1 Vulnerable.", "rarity": "Uncommon", "is_upgraded": false, "keywords": [], "enchantment": null, "affliction": null, "fields": {}, "unplayable": false}
+    ],
+    "selected_count": 0,
+    "required_count": 1,
+    "min_select": 0,
+    "max_select": 1,
+    "preview_showing": false,
+    "can_confirm": false,
+    "can_cancel": true,
+    "selection": {
+      "kind": "CHOOSE",
+      "pile": null,
+      "prompt_key": "gameplay_ui.CHOOSE_CARD_HEADER",
+      "source": {"type": "potion", "id": "ATTACK_POTION", "uid": null},
+      "min": 0,
+      "max": 1,
+      "can_skip": true,
+      "selected": []
+    }
+  },
+  "player": {
+    "character_id": "IRONCLAD",
+    "character": "The Ironclad",
+    "hp": 68,
+    "max_hp": 80,
+    "block": 0,
+    "gold": 99,
+    "energy": 1,
+    "max_energy": 3,
+    "hand": [],
+    "draw_pile": [],
+    "discard_pile": [],
+    "exhaust_pile": [],
+    "status": [],
+    "relics": [],
+    "potions": [],
+    "max_potion_slots": 3,
+    "deck_count": 10,
+    "deck": []
+  }
+}
