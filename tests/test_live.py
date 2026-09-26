@@ -21,7 +21,15 @@ from pathlib import Path
 import pytest
 
 from coach.bridge.client import BridgeAuthError, BridgeUnavailable
-from coach.engine import Analysis, CheckResult, EngineError, EngineUnavailable, Move, MoveStat
+from coach.engine import (
+    Analysis,
+    CheckResult,
+    EngineError,
+    EngineUnavailable,
+    Move,
+    MoveStat,
+    StrategyResult,
+)
 from coach.grader import Grade
 from coach.live import CoachSession, CoachSettings, engine_health_problems
 
@@ -263,12 +271,15 @@ class FakeEngine:
     `healths` are the answers (or exceptions) to the health checks, in turn; the last
     one repeats."""
 
-    def __init__(self, respond, *, check=None, healths=(HEALTHY,)):
+    def __init__(self, respond, *, check=None, healths=(HEALTHY,), strategize=None):
         self.respond = respond
         self.check_respond = check or (lambda pre, move, post: CLEAN_CHECK)
+        # Default: no champion exported yet (EngineClient.strategy's own "no_model" answer).
+        self.strategize = strategize or (lambda live_run, decision: None)
         self.healths = list(healths)
         self.analyze_calls = []
         self.check_calls = []
+        self.strategy_calls = []
         self.health_calls = []  # the timeout of each health check
         self._gate = None
         self.holding = threading.Event()  # set once an analysis is being held
@@ -298,6 +309,10 @@ class FakeEngine:
     def check(self, pre, move, post):
         self.check_calls.append((pre, move, post))
         return self._answer(self.check_respond(pre, move, post))
+
+    def strategy(self, live_run, decision):
+        self.strategy_calls.append((live_run, decision))
+        return self._answer(self.strategize(live_run, decision))
 
     @staticmethod
     def _answer(outcome):
@@ -1752,6 +1767,7 @@ def test_the_coach_state_serializes_to_json_for_the_panel(make_session):
         "mode",
         "versions",
         "run",
+        "strategy",
     }
     assert data["status"] == "advice"
     assert data["versions"] == {"ok": True, "problems": []}
@@ -1824,3 +1840,171 @@ def test_run_survives_an_unexpected_error_and_shows_it_as_one_sentence(make_sess
     assert crashed.status == "advice_off"
     assert "boom with a second line" in crashed.status_text
     assert latest(published).status == "advice"
+
+
+# --- strategy: non-combat decisions (coach-strategy) ----------------------------------
+
+
+def map_screen(seq=20, act=1, floor=1, node=(0, 0)):
+    """A minimal settled `map` screen: enough for `classify` (non-combat) and
+    `LiveRunTracker` (a map to cache, `run.map_coord`), nothing a card-reward or shop
+    screen would also need."""
+    col, row = node
+    return {
+        "state_type": "map",
+        "schema_version": 4,
+        "mod_version": "0.4.0",
+        "is_resolving": False,
+        "action_log_seq": seq,
+        "run": {"act": act, "floor": floor, "ascension": 0, "map_coord": {"col": col, "row": row}},
+        "player": {
+            "hp": 60,
+            "max_hp": 70,
+            "gold": 50,
+            "deck": [],
+            "relics": [],
+            "potions": [],
+            "max_potion_slots": 2,
+        },
+        "map": {
+            "current_position": {"col": col, "row": row, "type": "Ancient"},
+            "nodes": [],
+            "boss": {"id": "SOUL_FYSH_BOSS"},
+            "next_options": [{"index": 0, "col": 0, "row": 1, "type": "Monster"}],
+        },
+    }
+
+
+def strategy_shown(published):
+    def condition():
+        state = published[-1] if published else None
+        return state is not None and state.strategy is not None and state.strategy["status"] != "pending"
+
+    return condition
+
+
+def test_a_non_combat_screen_asks_the_engine_and_shows_ranked_options_with_gaps(make_session):
+    good = {"kind": "map.node", "node": [3, 1, 1]}
+    bad = {"kind": "map.node", "node": [0, 1, 1]}
+    result = StrategyResult(
+        options=[
+            {"option": good, "value": 17.5, "p_boss": 0.24},
+            {"option": bad, "value": 16.3, "p_boss": 0.17},
+        ],
+        model={"generation": 12, "selfplay_boss_kill_rate": 0.66},
+    )
+    bridge = FakeBridge()
+    engine = FakeEngine(standard_analysis, strategize=lambda live_run, decision: result)
+    session, published = make_session(bridge, engine)
+
+    settle(session, bridge, map_screen())
+    step_until(session, strategy_shown(published))
+
+    assert len(engine.strategy_calls) == 1
+    live_run, screen = engine.strategy_calls[0]
+    assert live_run == {
+        "run": {"act": 1, "floor": 1, "ascension": 0, "map_coord": {"col": 0, "row": 0}},
+        "player": map_screen()["player"],
+        "map": {"act": 1, **map_screen()["map"]},
+    }
+    assert screen["state_type"] == "map"
+    assert screen["event_step"] is None and screen["source"] is None
+
+    strategy = latest(published).strategy
+    assert strategy["screen"] == "map"
+    assert strategy["status"] == "done"
+    assert [o["label"] for o in strategy["options"]] == [
+        "map.node: node [3, 1, 1]",
+        "map.node: node [0, 1, 1]",
+    ]
+    assert strategy["options"][0]["gap"] == 0
+    assert strategy["options"][1]["gap"] == pytest.approx(1.2)
+    assert strategy["boss_win_chance"] == pytest.approx(0.24)
+    assert strategy["model"]["generation"] == 12
+    # Combat's own advice channel is untouched by a non-combat screen.
+    assert latest(published).status == "idle"
+    assert latest(published).recommendation is None
+
+
+def test_a_combat_decision_never_calls_strategy(make_session):
+    def must_not_be_called(live_run, decision):
+        raise AssertionError("strategy must not be asked about a combat decision")
+
+    bridge = FakeBridge()
+    engine = FakeEngine(standard_analysis, strategize=must_not_be_called)
+    session, published = make_session(bridge, engine)
+
+    settle(session, bridge, combat(seq=12))
+    step_until(session, advising(published))
+
+    assert engine.strategy_calls == []
+    assert latest(published).strategy is None
+
+
+def test_the_engine_being_unhealthy_blocks_strategy_until_the_override_is_on(make_session):
+    settings = CoachSettings()
+    bridge = FakeBridge()
+    engine = FakeEngine(standard_analysis)
+    session, published = make_session(
+        bridge,
+        engine,
+        settings,
+        engine_problems=["the engine service failed its health check (boom)"],
+    )
+
+    settle(session, bridge, map_screen())
+    session.step()
+
+    assert engine.strategy_calls == []
+    assert latest(published).strategy == {
+        "screen": "map",
+        "status": "blocked",
+        "error": None,
+        "options": None,
+        "boss_win_chance": None,
+        "model": None,
+    }
+
+    settings.override_versions = True  # the panel's "Show advice anyway"
+    step_until(session, lambda: latest(published).strategy["status"] not in ("blocked", "pending"))
+    assert latest(published).strategy["status"] == "done"  # FakeEngine's default: no_model
+    assert engine.strategy_calls != []
+
+
+def test_a_screen_before_any_map_this_act_is_unreadable_and_asks_the_engine_nothing(
+    make_session,
+):
+    bridge = FakeBridge()
+    engine = FakeEngine(standard_analysis)
+    session, published = make_session(bridge, engine)
+
+    shop = load("state_non_combat.json")  # state_type "shop"; no map cached yet this act
+    settle(session, bridge, shop)
+    session.step()
+
+    assert engine.strategy_calls == []
+    strategy = latest(published).strategy
+    assert strategy["screen"] == "shop"
+    assert strategy["status"] == "unreadable"
+    assert strategy["options"] is None
+
+
+def test_a_later_map_screen_is_cached_for_a_card_reward_screen_after_it(make_session):
+    result = StrategyResult(options=[{"option": {"kind": "card.take"}, "value": 5.0, "p_boss": 0.1}], model={})
+    bridge = FakeBridge()
+    engine = FakeEngine(standard_analysis, strategize=lambda live_run, decision: result)
+    session, published = make_session(bridge, engine)
+
+    settle(session, bridge, map_screen(seq=20))
+    step_until(session, strategy_shown(published))
+
+    card_reward = load("state_non_combat.json")
+    card_reward.update(state_type="card_reward", card_reward={"cards": [], "can_skip": True})
+    card_reward["action_log_seq"] = 21
+    settle(session, bridge, card_reward)
+    step_until(session, lambda: len(engine.strategy_calls) == 2)
+
+    _, second_screen = engine.strategy_calls[1]
+    assert second_screen["state_type"] == "card_reward"
+    second_live_run = engine.strategy_calls[1][0]
+    assert second_live_run["map"]["boss"] == {"id": "SOUL_FYSH_BOSS"}  # cached from the map screen

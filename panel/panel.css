@@ -460,6 +460,22 @@ button:disabled {
   color: var(--danger);
 }
 
+/* --- non-combat advice (the strategy champion): reuses .advice-head/.best/.outcome/
+   .stat/.alternatives above; only the section's own spacing is new -------------------- */
+
+.strategy {
+  padding-top: 12px;
+  border-top: 1px solid var(--stone);
+}
+
+.strategy .best-name {
+  font-size: 21px;
+}
+
+.strategy .outcome {
+  margin-top: 6px;
+}
+
 /* --- layouts and states --------------------------------------------------------------- */
 
 [data-layout="compact"] .expanded-only,
@@ -474,7 +490,8 @@ button:disabled {
 /* No contact with the coach: what is shown may be out of date. */
 .stale .last,
 .stale .advice,
-.stale .others {
+.stale .others,
+.stale .strategy {
   opacity: 0.45;
 }
 

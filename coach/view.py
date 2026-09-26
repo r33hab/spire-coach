@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Protocol
 
 from coach.bridge.versions import VersionStatus
-from coach.engine import Analysis, CheckResult, Move, MoveStat
+from coach.engine import Analysis, CheckResult, Move, MoveStat, StrategyResult
 from coach.grader import Grade
 
 _ALTERNATIVES_MAX = 3
@@ -38,6 +38,9 @@ class CoachState:
     mode: str
     versions: VersionStatus
     run: dict
+    # Non-combat advice (the strategy champion), or None when there is none to show:
+    # the panel's counterpart to `recommendation`, built by `_strategy_dict`.
+    strategy: dict | None = None
 
     def to_dict(self) -> dict:
         return _json_safe(dataclasses.asdict(self))
@@ -57,6 +60,19 @@ class ShownPosition(Protocol):
     revealed: bool
 
 
+class StrategyShown(Protocol):
+    """What the panel reads off the non-combat screen on screen (coach/live.py's
+    `_StrategyPosition`). `status`: "pending" (asked, no answer yet), "blocked"
+    (advice is off), "unreadable" (no map cached yet this act: 3.5 needs one), "done"
+    (`result` is the engine's answer, or None: no champion is exported), "failed" (the
+    engine call raised)."""
+
+    status: str
+    state_type: str | None
+    result: StrategyResult | None
+    error: str | None
+
+
 def compose(
     position: ShownPosition | None,
     *,
@@ -72,10 +88,14 @@ def compose(
     engine_restarting: bool,
     z: float,
     potion_value_hp: float,
+    strategy: StrategyShown | None = None,
 ) -> CoachState:
     """The panel's state for this situation. `position` is the combat decision on
     screen, or None when there is none; `engine_restarting` says the engine client is
-    restarting the service (its on_restart fired and the request has not come back)."""
+    restarting the service (its on_restart fired and the request has not come back).
+    `strategy` is the non-combat screen's strategy result, independent of `position`:
+    it is shown alongside whatever `position` says, combat and non-combat decisions
+    never being on screen at once."""
 
     def shown(status: str, text: str, recommendation: dict | None = None) -> CoachState:
         return CoachState(
@@ -86,6 +106,7 @@ def compose(
             mode=mode,
             versions=versions,
             run=dict(run),
+            strategy=_strategy_dict(strategy),
         )
 
     if internal_error is not None:
@@ -129,6 +150,78 @@ def compose(
         potion_value_hp=potion_value_hp,
     )
     return shown("advice", _advice_text(position, recommendation), recommendation)
+
+
+def _strategy_dict(strategy: StrategyShown | None) -> dict | None:
+    """The panel's non-combat counterpart to `_recommendation`: the champion's ranked
+    options, best first, each with its value's gap to the best, and the boss win
+    chance the model gives its top pick (spec 5.2: None below the champion's 5%
+    self-play floor, or with no `model.json` at all)."""
+    if strategy is None:
+        return None
+    base = {"screen": strategy.state_type, "options": None, "boss_win_chance": None, "model": None}
+    if strategy.status == "failed":
+        return {
+            **base,
+            "status": "failed",
+            "error": sentence(strategy.error or "the engine could not score this screen"),
+        }
+    if strategy.result is None:
+        return {**base, "status": strategy.status, "error": None}
+    options = _strategy_options(strategy.result.options)
+    return {
+        **base,
+        "status": "done",
+        "error": None,
+        "options": options,
+        "boss_win_chance": options[0]["p_boss"] if options else None,
+        "model": _json_safe(strategy.result.model),
+    }
+
+
+def _strategy_options(options: list[dict]) -> list[dict]:
+    """The engine's best-first options (already sorted, unscored last), each with a
+    human label and its value's gap to the best (0 for the best; None when either
+    value is unscored)."""
+    values = [_finite(option.get("value")) for option in options]
+    best_value = next((value for value in values if value is not None), None)
+    result = []
+    for option, value in zip(options, values):
+        gap = best_value - value if best_value is not None and value is not None else None
+        descriptor = option.get("option") or {}
+        result.append(
+            {
+                "label": _strategy_option_label(descriptor),
+                "value": value,
+                "p_boss": _finite(option.get("p_boss")),
+                "gap": gap,
+                "scorable": bool(descriptor.get("scorable", True)),
+            }
+        )
+    return result
+
+
+def _strategy_option_label(option: dict) -> str:
+    """A short, human label for an `Option` (DESIGN.md 3.4): its kind, plus whatever
+    identifies it (a card, a relic, a potion, a map node, an event choice)."""
+    kind = option.get("kind") or "option"
+    card = option.get("card")
+    if isinstance(card, dict) and card.get("id"):
+        return f"{kind}: {card['id']}"
+    cards = option.get("cards")
+    if isinstance(cards, list) and cards:
+        ids = ", ".join(card["id"] for card in cards if isinstance(card, dict) and card.get("id"))
+        if ids:
+            return f"{kind}: {ids}"
+    for name in ("relic", "potion"):
+        value = option.get(name)
+        if value is not None:
+            return f"{kind}: {name} {value}"
+    for name in ("node", "event"):
+        value = option.get(name)
+        if value is not None:
+            return f"{kind}: {name} {list(value)}"
+    return kind
 
 
 def _override_warnings(versions: VersionStatus) -> list[str]:

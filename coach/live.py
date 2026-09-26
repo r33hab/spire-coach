@@ -66,9 +66,18 @@ from coach.bridge.decisions import (
     classify,
     fingerprint,
 )
+from coach.bridge.live_run import LiveRunTracker
 from coach.bridge.versions import VersionStatus, check_versions, read_game_version
 from coach.config import EXPECTED_GAME_VERSION
-from coach.engine import Analysis, CheckResult, EngineClient, EngineError, EngineUnavailable, Move
+from coach.engine import (
+    Analysis,
+    CheckResult,
+    EngineClient,
+    EngineError,
+    EngineUnavailable,
+    Move,
+    StrategyResult,
+)
 from coach.runlog import RunLog
 from coach.snapshot import SnapshotError, build_live_snapshot
 from coach.view import (
@@ -180,6 +189,23 @@ class _Position:
 
 
 @dataclass(eq=False)
+class _StrategyPosition:
+    """One settled non-combat screen and what the coach made of it: the strategy
+    counterpart to `_Position`. Simpler on purpose (no grading, no staleness beyond
+    "is this still the screen on show"): `status` is "pending" (asked, no answer
+    yet), "blocked" (advice is off), "unreadable" (3.5 needs a map cached for this
+    act, and none is yet), "done" (`result` is the engine's answer; None means no
+    champion is exported), or "failed" (the engine call raised, named in `error`)."""
+
+    fingerprint: str
+    state_type: str | None
+    state: dict
+    status: str = "pending"
+    result: StrategyResult | None = None
+    error: str | None = None
+
+
+@dataclass(eq=False)
 class _Seen:
     """A settled position as it was seen, with the action log's newest seq at that
     moment (the seq of the first poll that showed it), or None when that is ambiguous:
@@ -258,6 +284,8 @@ class CoachSession:
         # Called by the client on the engine thread, with its lock held: only note it.
         engine.on_restart = lambda: self._results.put(_ENGINE_RESTARTING)
         self._stabilizer = Stabilizer()
+        self._live_run_tracker = LiveRunTracker()
+        self._strategy_position: _StrategyPosition | None = None
 
         self._mode = settings.mode
         self._connected = False
@@ -412,8 +440,13 @@ class CoachSession:
         if decision.kind in _COMBAT_DECISIONS:
             self._current = position
             self._maybe_analyze(position)
+            self._strategy_position = None
+        elif decision.kind is DecisionKind.NON_COMBAT:
+            self._current = None
+            self._maybe_strategize(state, decision, key)
         else:
             self._current = None
+            self._strategy_position = None
         if previous is not None:
             self._queue_selection_grade(previous, seen)
         self._process_grades()
@@ -503,6 +536,13 @@ class CoachSession:
         position = self._current
         if position is not None and position.status == "blocked" and self._advice_allowed():
             self._maybe_analyze(position)
+        strategy_position = self._strategy_position
+        if (
+            strategy_position is not None
+            and strategy_position.status == "blocked"
+            and self._advice_allowed()
+        ):
+            self._submit_strategy(strategy_position)
 
     # --- engine health -------------------------------------------------------------
 
@@ -628,6 +668,58 @@ class CoachSession:
                 )
         self._runlog.append("analysis", record)
         self._process_grades()
+
+    # --- strategy (non-combat decisions) ----------------------------------------------
+
+    def _maybe_strategize(self, state: dict, decision: Decision, key: str) -> None:
+        current = self._strategy_position
+        if current is not None and current.fingerprint == key:
+            return  # the same screen already asked about, or in flight
+        position = _StrategyPosition(key, decision.state_type, state)
+        self._strategy_position = position
+        if not self._advice_allowed():
+            position.status = "blocked"
+            return
+        self._submit_strategy(position)
+
+    def _submit_strategy(self, position: _StrategyPosition) -> None:
+        live_run, screen = self._live_run_tracker.build(position.state)
+        if live_run is None:
+            # 3.5: the strategy champion needs a map cached for this act, and the
+            # coach has not seen one yet (a screen before the first map of the act).
+            position.status = "unreadable"
+            position.error = "no map seen yet this act"
+            return
+        position.status = "pending"
+        position.error = None
+        job = Job(
+            lambda: self._engine.strategy(live_run, screen),
+            context=("strategy", position),
+            # Asked when the job's turn comes: a screen the player has since left is
+            # no longer wanted, the same way a stale combat analysis is skipped.
+            wanted=lambda: position is self._strategy_position,
+        )
+        self._worker.submit(job, urgent=True)
+
+    def _on_strategy(self, position: _StrategyPosition, outcome: object) -> None:
+        if outcome is SKIPPED or position is not self._strategy_position:
+            return  # a newer screen replaced it before this landed
+        if outcome is None or isinstance(outcome, StrategyResult):
+            position.status = "done"
+            position.result = outcome  # None: no champion is exported yet (no_model)
+        else:
+            position.status = "failed"
+            position.error = one_line(outcome)
+        self._runlog.append(
+            "strategy",
+            {
+                "fingerprint": position.fingerprint,
+                "screen": position.state_type,
+                "status": position.status,
+                "options": len(position.result.options) if position.result is not None else None,
+                "error": position.error,
+            },
+        )
 
     # --- grading ---------------------------------------------------------------------
 
@@ -851,6 +943,8 @@ class CoachSession:
                 self._on_analysis(*context, outcome)
             elif kind == "health":
                 self._on_engine_health(outcome)
+            elif kind == "strategy":
+                self._on_strategy(*context, outcome)
             else:
                 self._on_check(*context, outcome)
         self._refresh()
@@ -879,6 +973,7 @@ class CoachSession:
             engine_restarting=self._engine_restarting,
             z=self._settings.thresholds.z,
             potion_value_hp=self._settings.potion_value_hp,
+            strategy=self._strategy_position,
         )
         if state != self._published:
             self._publish(state)

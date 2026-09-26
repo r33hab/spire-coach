@@ -52,6 +52,12 @@
     warnings: byId("warnings"),
     others: byId("others"),
     alternatives: byId("alternatives"),
+    strategy: byId("strategy"),
+    strategyScreen: byId("strategy-screen"),
+    strategyBestName: byId("strategy-best-name"),
+    strategyOutcome: byId("strategy-outcome"),
+    strategyBossWin: byId("strategy-boss-win"),
+    strategyOptions: byId("strategy-options"),
   };
 
   let state = null; // the last CoachState from the coach
@@ -196,6 +202,7 @@
     renderStatus();
     renderGrade(state ? state.last_grade : null);
     renderAdvice(state && state.recommendation ? state.recommendation : null);
+    renderStrategy(state && state.strategy ? state.strategy : null);
   }
 
   function renderBar() {
@@ -373,6 +380,43 @@
         return row;
       }),
     );
+  }
+
+  // Non-combat advice: the strategy champion's ranked options for the screen on show
+  // (a map, a card reward, a shop, ...), independent of the combat advice above.
+  function renderStrategy(strategy) {
+    const options = strategy && Array.isArray(strategy.options) ? strategy.options : null;
+    view.strategy.hidden = !options || options.length === 0;
+    if (!options || options.length === 0) return;
+
+    view.strategyScreen.textContent = strategy.screen || "";
+    view.strategyScreen.hidden = !strategy.screen;
+    view.strategyBestName.textContent = options[0].label || "Option";
+
+    const chance = percent(strategy.boss_win_chance);
+    view.strategyOutcome.hidden = chance === null;
+    view.strategyBossWin.textContent = chance ?? "";
+
+    view.strategyOptions.replaceChildren(
+      ...options.map((option, index) => {
+        const row = document.createElement("li");
+        const name = document.createElement("span");
+        name.className = "move";
+        name.textContent = option.label || "Option";
+        const gap = document.createElement("span");
+        gap.className = "cost";
+        gap.textContent = index === 0 ? "best" : (valueGap(option.gap) ?? "no data");
+        row.append(name, gap);
+        return row;
+      }),
+    );
+  }
+
+  // The value's gap to the best option, in the champion's own units (expected final
+  // floor, DESIGN.md 5.2): not HP, so shown with two decimals rather than `hp()`'s.
+  function valueGap(value) {
+    if (typeof value !== "number" || !Number.isFinite(value)) return null;
+    return `−${value.toFixed(2)}`;
   }
 
   // --- helpers ------------------------------------------------------------------------
