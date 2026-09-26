@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from coach.bridge.versions import VersionStatus
-from coach.engine import Analysis, Move, MoveStat
+from coach.engine import Analysis, Move, MoveStat, StrategyResult
 from coach.view import CoachState, compose, one_line, sentence
 
 OK = VersionStatus(ok=True, problems=[])
@@ -147,3 +147,62 @@ def test_texts_are_one_line_sentences():
     assert one_line(ValueError()) == "ValueError"
     assert sentence("could not read it") == "could not read it."
     assert sentence("is the game running?") == "is the game running?"
+
+
+# --- strategy: non-combat advice (coach-strategy) -------------------------------------
+
+
+def strategy_with(options, *, status="done", state_type="map", error=None, model=None):
+    result = None if options is None else StrategyResult(options=options, model=model or {})
+    return SimpleNamespace(status=status, state_type=state_type, result=result, error=error)
+
+
+def test_strategy_options_carry_their_gap_to_the_best_and_the_top_picks_boss_chance():
+    strategy = strategy_with(
+        [
+            {"option": {"kind": "shop.card", "card": {"id": "STRIKE"}}, "value": 20.0, "p_boss": 0.4},
+            {"option": {"kind": "shop.leave"}, "value": 18.5, "p_boss": 0.3},
+            {"option": {"kind": "shop.relic", "relic": 7}, "value": None, "p_boss": None},
+        ],
+        model={"generation": 3},
+    )
+
+    data = shown(None, strategy=strategy).strategy
+
+    assert data["screen"] == "map"
+    assert data["status"] == "done"
+    assert [o["label"] for o in data["options"]] == [
+        "shop.card: STRIKE",
+        "shop.leave",
+        "shop.relic: relic 7",
+    ]
+    assert [o["gap"] for o in data["options"]] == [0, pytest.approx(1.5), None]
+    assert data["boss_win_chance"] == pytest.approx(0.4)
+    assert data["model"] == {"generation": 3}
+
+
+def test_a_strategy_call_with_no_champion_exported_shows_no_options():
+    strategy = strategy_with(None, status="done")
+
+    assert shown(None, strategy=strategy).strategy == {
+        "screen": "map",
+        "status": "done",
+        "error": None,
+        "options": None,
+        "boss_win_chance": None,
+        "model": None,
+    }
+
+
+def test_a_failed_strategy_call_is_shown_as_a_sentence():
+    strategy = strategy_with(None, status="failed", error=ValueError("boom"))
+
+    data = shown(None, strategy=strategy).strategy
+
+    assert data["status"] == "failed"
+    assert data["error"] == "boom."
+
+
+def test_no_strategy_leaves_the_panels_field_null():
+    assert shown(None).strategy is None
+    assert shown(position_with(stat())).strategy is None
