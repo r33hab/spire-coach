@@ -152,15 +152,21 @@ def test_texts_are_one_line_sentences():
 # --- strategy: non-combat advice (coach-strategy) -------------------------------------
 
 
-def strategy_with(options, *, status="done", state_type="map", error=None, model=None):
+def strategy_with(options, *, status="done", state_type="map", error=None, model=None, act=1):
     result = None if options is None else StrategyResult(options=options, model=model or {})
-    return SimpleNamespace(status=status, state_type=state_type, result=result, error=error)
+    return SimpleNamespace(
+        status=status, state_type=state_type, result=result, error=error, act=act
+    )
 
 
 def test_strategy_options_carry_their_gap_to_the_best_and_the_top_picks_boss_chance():
     strategy = strategy_with(
         [
-            {"option": {"kind": "shop.card", "card": {"id": "STRIKE"}}, "value": 20.0, "p_boss": 0.4},
+            {
+                "option": {"kind": "shop.card", "card": {"id": "STRIKE"}},
+                "value": 20.0,
+                "p_boss": 0.4,
+            },
             {"option": {"kind": "shop.leave"}, "value": 18.5, "p_boss": 0.3},
             {"option": {"kind": "shop.relic", "relic": 7}, "value": None, "p_boss": None},
         ],
@@ -195,7 +201,31 @@ def test_a_strategy_call_with_no_champion_exported_shows_no_options():
 
 
 def test_a_failed_strategy_call_is_shown_as_a_sentence():
-    strategy = strategy_with(None, status="failed", error=ValueError("boom"))
+    strategy = strategy_with(None, status="failed", error=ValueError("boom"), act=1)
+
+    data = shown(None, strategy=strategy).strategy
+
+    assert data["status"] == "failed"
+    assert data["error"] == "boom."
+
+
+def test_a_failed_strategy_call_outside_act_1_shows_the_panel_note():
+    # The strategy champion is trained on Act 1 only; every Act 2-3 screen fails
+    # (UnknownIdError: map.boss.id, among others), and that is not a coach failure.
+    strategy = strategy_with(
+        None, status="failed", error=ValueError("UnknownIdError: map.boss.id"), act=2
+    )
+
+    data = shown(None, strategy=strategy).strategy
+
+    assert data["status"] == "failed"
+    assert data["error"] == "No between-fight advice outside Act 1 yet."
+
+
+def test_a_failed_strategy_call_with_no_known_act_is_shown_as_a_sentence():
+    # `act` is None before the coach has settled on any run info yet (session start);
+    # that is not known to be outside Act 1, so the real error still shows.
+    strategy = strategy_with(None, status="failed", error=ValueError("boom"), act=None)
 
     data = shown(None, strategy=strategy).strategy
 

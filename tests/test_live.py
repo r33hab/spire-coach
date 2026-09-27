@@ -1878,7 +1878,11 @@ def map_screen(seq=20, act=1, floor=1, node=(0, 0)):
 def strategy_shown(published):
     def condition():
         state = published[-1] if published else None
-        return state is not None and state.strategy is not None and state.strategy["status"] != "pending"
+        return (
+            state is not None
+            and state.strategy is not None
+            and state.strategy["status"] != "pending"
+        )
 
     return condition
 
@@ -1924,6 +1928,43 @@ def test_a_non_combat_screen_asks_the_engine_and_shows_ranked_options_with_gaps(
     # Combat's own advice channel is untouched by a non-combat screen.
     assert latest(published).status == "idle"
     assert latest(published).recommendation is None
+
+
+def test_a_failed_strategy_call_outside_act_1_shows_the_panel_note(make_session):
+    # 3.5's strategy champion is trained on Act 1 only, so every Act 2-3 screen fails
+    # (UnknownIdError: map.boss.id, among others); the panel shows that as a known gap,
+    # not a coach failure.
+    def fails(live_run, decision):
+        return EngineError("engine returned unknown_id: map.boss.id", error_type="unknown_id")
+
+    bridge = FakeBridge()
+    engine = FakeEngine(standard_analysis, strategize=fails)
+    session, published = make_session(bridge, engine)
+
+    settle(session, bridge, map_screen(act=2))
+    step_until(session, strategy_shown(published))
+
+    strategy = latest(published).strategy
+    assert strategy["status"] == "failed"
+    assert strategy["error"] == "No between-fight advice outside Act 1 yet."
+
+
+def test_a_failed_strategy_call_in_act_1_shows_the_real_error(make_session):
+    def fails(live_run, decision):
+        return EngineError(
+            "engine returned conversion: unknown card id XYZ", error_type="conversion"
+        )
+
+    bridge = FakeBridge()
+    engine = FakeEngine(standard_analysis, strategize=fails)
+    session, published = make_session(bridge, engine)
+
+    settle(session, bridge, map_screen(act=1))
+    step_until(session, strategy_shown(published))
+
+    strategy = latest(published).strategy
+    assert strategy["status"] == "failed"
+    assert strategy["error"] == "engine returned conversion: unknown card id XYZ."
 
 
 def test_a_combat_decision_never_calls_strategy(make_session):
@@ -1990,7 +2031,9 @@ def test_a_screen_before_any_map_this_act_is_unreadable_and_asks_the_engine_noth
 
 
 def test_a_later_map_screen_is_cached_for_a_card_reward_screen_after_it(make_session):
-    result = StrategyResult(options=[{"option": {"kind": "card.take"}, "value": 5.0, "p_boss": 0.1}], model={})
+    result = StrategyResult(
+        options=[{"option": {"kind": "card.take"}, "value": 5.0, "p_boss": 0.1}], model={}
+    )
     bridge = FakeBridge()
     engine = FakeEngine(standard_analysis, strategize=lambda live_run, decision: result)
     session, published = make_session(bridge, engine)

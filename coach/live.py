@@ -195,11 +195,17 @@ class _StrategyPosition:
     "is this still the screen on show"): `status` is "pending" (asked, no answer
     yet), "blocked" (advice is off), "unreadable" (3.5 needs a map cached for this
     act, and none is yet), "done" (`result` is the engine's answer; None means no
-    champion is exported), or "failed" (the engine call raised, named in `error`)."""
+    champion is exported), or "failed" (the engine call raised, named in `error`).
+
+    `act` is the run's act when the screen settled (`coach.live._run`'s own reading of
+    `state["run"]["act"]`), which the panel uses to tell a real failure from the
+    strategy champion's Act 1-only training showing up as one (`view._strategy_dict`).
+    """
 
     fingerprint: str
     state_type: str | None
     state: dict
+    act: int | None
     status: str = "pending"
     result: StrategyResult | None = None
     error: str | None = None
@@ -675,7 +681,7 @@ class CoachSession:
         current = self._strategy_position
         if current is not None and current.fingerprint == key:
             return  # the same screen already asked about, or in flight
-        position = _StrategyPosition(key, decision.state_type, state)
+        position = _StrategyPosition(key, decision.state_type, state, self._run.get("act"))
         self._strategy_position = position
         if not self._advice_allowed():
             position.status = "blocked"
