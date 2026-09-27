@@ -1260,6 +1260,122 @@ def test_hidden_and_unknown_fields_never_leak(combat_state):
 
 
 # ---------------------------------------------------------------------------
+# Power fields (schema section 1, amended 2026-09-27)
+# ---------------------------------------------------------------------------
+
+# Written out from the schema's amendment, not imported from coach.snapshot.
+_POWER_FIELD_KEYS = {
+    "SKITTISH_POWER": {"has_gained_block_this_turn"},
+    "SURROUNDED_POWER": {"facing"},
+    "POSSESS_SPEED_POWER": {"stolen"},
+    "POSSESS_STRENGTH_POWER": {"stolen"},
+    "SWIPE_POWER": {"stolen_card", "stolen_card_upgraded"},
+}
+
+
+def _raw_power(entry: str, amount: int = 1, **extra) -> dict:
+    return {
+        "id": entry,
+        "name": entry.title(),
+        "amount": amount,
+        "type": "Buff",
+        "description": "",
+        "keywords": [],
+        **extra,
+    }
+
+
+def test_power_fields_the_converter_reads_are_carried_and_nothing_else(combat_state):
+    state = copy.deepcopy(combat_state)
+    state["player"]["status"].append(
+        _raw_power("SURROUNDED_POWER", fields={"facing": "Left", "_facing": _FORBIDDEN_SENTINEL})
+    )
+    state["battle"]["enemies"][0]["status"] += [
+        _raw_power(
+            "SKITTISH_POWER",
+            6,
+            fields={"has_gained_block_this_turn": True, "stolen": _FORBIDDEN_SENTINEL},
+        ),
+        _raw_power("POSSESS_SPEED_POWER", fields={"stolen": 2}),
+        _raw_power("POSSESS_STRENGTH_POWER", fields={"stolen": 0}),
+        _raw_power(
+            "SWIPE_POWER",
+            fields={"stolen_card": "FIGHT_ME", "stolen_card_upgraded": True},
+        ),
+        # A power with no named keys carries no fields, whatever the mod sends.
+        _raw_power("RITUAL_POWER", 3, fields={"facing": _FORBIDDEN_SENTINEL}),
+    ]
+    snapshot = build_live_snapshot(state, game_version=GAME_VERSION)
+
+    assert snapshot["player"]["powers"][-1] == {
+        "id": "SURROUNDED_POWER",
+        "amount": 1,
+        "fields": {"facing": "Left"},
+    }
+    assert snapshot["enemies"][0]["powers"][1:] == [
+        {"id": "SKITTISH_POWER", "amount": 6, "fields": {"has_gained_block_this_turn": True}},
+        {"id": "POSSESS_SPEED_POWER", "amount": 1, "fields": {"stolen": 2}},
+        {"id": "POSSESS_STRENGTH_POWER", "amount": 1, "fields": {"stolen": 0}},
+        {
+            "id": "SWIPE_POWER",
+            "amount": 1,
+            "fields": {"stolen_card": "FIGHT_ME", "stolen_card_upgraded": True},
+        },
+        {"id": "RITUAL_POWER", "amount": 3},
+    ]
+    assert _FORBIDDEN_SENTINEL not in json.dumps(snapshot)
+
+
+def test_a_power_without_its_fields_carries_none(combat_state):
+    # An older mod sends no power fields; the converter then warns about the power.
+    state = copy.deepcopy(combat_state)
+    state["battle"]["enemies"][0]["status"] += [
+        _raw_power("SKITTISH_POWER", 6),
+        _raw_power("POSSESS_SPEED_POWER", fields=None),
+    ]
+    snapshot = build_live_snapshot(state, game_version=GAME_VERSION)
+
+    assert snapshot["enemies"][0]["powers"][1:] == [
+        {"id": "SKITTISH_POWER", "amount": 6},
+        {"id": "POSSESS_SPEED_POWER", "amount": 1},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("tip", "card", "upgraded"),
+    [("CARD.FIGHT_ME+", "FIGHT_ME", True), ("CARD.BASH", "BASH", False)],
+)
+def test_the_swiped_card_falls_back_to_its_hover_tip(combat_state, tip, card, upgraded):
+    # SwipePower's hover tip is the card it stole (decompiled SwipePower.ExtraHoverTips),
+    # which a mod without power fields already reports as keywords[].id.
+    state = copy.deepcopy(combat_state)
+    swipe = _raw_power(
+        "SWIPE_POWER",
+        keywords=[{"name": card.title(), "description": "", "id": tip}],
+    )
+    state["battle"]["enemies"][0]["status"].append(swipe)
+    snapshot = build_live_snapshot(state, game_version=GAME_VERSION)
+
+    assert snapshot["enemies"][0]["powers"][-1] == {
+        "id": "SWIPE_POWER",
+        "amount": 1,
+        "fields": {"stolen_card": card, "stolen_card_upgraded": upgraded},
+    }
+
+
+def test_a_hover_tip_that_is_not_a_card_gives_swipe_no_card(combat_state):
+    state = copy.deepcopy(combat_state)
+    swipe = _raw_power(
+        "SWIPE_POWER",
+        keywords=[{"name": "Strength", "description": "", "id": "POWER.STRENGTH_POWER"}],
+    )
+    state["battle"]["enemies"][0]["status"].append(swipe)
+    snapshot = build_live_snapshot(state, game_version=GAME_VERSION)
+
+    assert snapshot["enemies"][0]["powers"][-1] == {"id": "SWIPE_POWER", "amount": 1}
+
+
+# ---------------------------------------------------------------------------
 # Structural validation against schema section 1 (required keys and types,
 # broadened to every output field per M7)
 # ---------------------------------------------------------------------------
@@ -1352,6 +1468,16 @@ def _assert_card_shape(card: dict) -> None:
     assert isinstance(card["fields"], dict)
 
 
+def _assert_power_shape(power: dict) -> None:
+    # `fields` is optional: only a power that has one of the named keys carries it.
+    assert set(power.keys()) in ({"id", "amount"}, {"id", "amount", "fields"})
+    assert isinstance(power["id"], str)
+    assert isinstance(power["amount"], int)
+    if "fields" in power:
+        assert power["fields"]
+        assert set(power["fields"]) <= _POWER_FIELD_KEYS[power["id"]]
+
+
 def test_output_matches_schema_shape(combat_state):
     snapshot = build_live_snapshot(combat_state, game_version=GAME_VERSION)
 
@@ -1383,9 +1509,7 @@ def test_output_matches_schema_shape(combat_state):
         assert set(orb.keys()) == {"id", "passive", "evoke"}
         assert isinstance(orb["id"], str)
     for power in player["powers"]:
-        assert set(power.keys()) == {"id", "amount"}
-        assert isinstance(power["id"], str)
-        assert isinstance(power["amount"], int)
+        _assert_power_shape(power)
     for relic in player["relics"]:
         assert set(relic.keys()) == {"id", "counter", "fields"}
         assert isinstance(relic["id"], str)
@@ -1421,9 +1545,7 @@ def test_output_matches_schema_shape(combat_state):
         assert isinstance(enemy["max_hp"], int)
         assert isinstance(enemy["block"], int)
         for power in enemy["powers"]:
-            assert set(power.keys()) == {"id", "amount"}
-            assert isinstance(power["id"], str)
-            assert isinstance(power["amount"], int)
+            _assert_power_shape(power)
         for intent in enemy["intents"]:
             assert set(intent.keys()) == {"type", "damage", "base_damage", "hits"}
             assert intent["type"] in _EXPECTED_INTENT_TYPE_NAMES.values()

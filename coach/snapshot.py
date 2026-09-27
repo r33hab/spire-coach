@@ -12,7 +12,8 @@ read, by construction. The only two exceptions are `ai_fields` and relic
 `fields`/`saved`, which addendum rules 4 and 6 name as pass-through: the mod
 itself filters them to primitive instance fields before they ever reach the
 coach, and the converter on the other end reads only named, reviewed keys
-out of them.
+out of them. Power `fields` are not an exception: only the keys the schema
+names for each power are copied.
 
 See docs/superpowers/specs/2026-09-24-snapshot-schemas.md section 1 for the
 accepted shape, and
@@ -22,6 +23,7 @@ for the exact per-field adapter rules this module follows.
 
 from __future__ import annotations
 
+import re
 from collections import Counter, defaultdict
 
 SCHEMA = "sts2-live-snapshot/1"
@@ -91,6 +93,22 @@ _HISTORY_KEYS = (
     "attacks_played_this_turn",
     "skills_played_this_turn",
 )
+
+# Power `fields` (schema section 1, amended 2026-09-27): the state a power
+# keeps beside its amount that the converter reads, by power. The mod reports
+# them under the same names (STS2MCP docs/raw-full.md, power `fields`); any
+# other key, and any key on another power, is never copied.
+_POWER_FIELD_KEYS: dict[str, tuple[str, ...]] = {
+    "SKITTISH_POWER": ("has_gained_block_this_turn",),
+    "SURROUNDED_POWER": ("facing",),
+    "POSSESS_SPEED_POWER": ("stolen",),
+    "POSSESS_STRENGTH_POWER": ("stolen",),
+    "SWIPE_POWER": ("stolen_card", "stolen_card_upgraded"),
+}
+# SwipePower's hover tip is the card it stole (decompiled SwipePower
+# `ExtraHoverTips`), which the mod reports as a keyword id "CARD.<ENTRY>", with
+# a trailing "+" when upgraded. A mod without power fields still sends it.
+_SWIPE_CARD_TIP = re.compile(r"CARD\.([A-Z0-9_]+)(\+?)")
 
 # Card `fields`: the only two keys the converter understands
 # (task-11-addendum.md rule 2). `cost_until_played` and anything else is
@@ -403,11 +421,41 @@ def _build_ordered_pile(
 # ---------------------------------------------------------------------------
 
 
+def _build_power_fields(entry: str, power: dict) -> dict:
+    """Copy the named `fields` of a power (`_POWER_FIELD_KEYS`); {} for any other.
+
+    Optional: a mod that predates them, or could not read them (null), sends
+    none, and the converter says what that leaves out. Swipe's card falls back
+    to its hover tip.
+    """
+    raw = power.get("fields")
+    raw = raw if isinstance(raw, dict) else {}
+    fields = {
+        key: raw[key]
+        for key in _POWER_FIELD_KEYS.get(entry, ())
+        if key in raw and (raw[key] is None or isinstance(raw[key], (bool, int, str)))
+    }
+    if entry == "SWIPE_POWER" and "stolen_card" not in fields:
+        for tip in power.get("keywords") or []:
+            tip_id = tip.get("id") if isinstance(tip, dict) else None
+            match = _SWIPE_CARD_TIP.fullmatch(tip_id) if isinstance(tip_id, str) else None
+            if match is not None:
+                fields["stolen_card"] = match.group(1)
+                fields["stolen_card_upgraded"] = match.group(2) == "+"
+                break
+    return fields
+
+
 def _build_power(power: dict, *, path: str) -> dict:
-    return {
-        "id": _require_str(power, "id", f"{path}.id"),
+    entry = _require_str(power, "id", f"{path}.id")
+    built: dict = {
+        "id": entry,
         "amount": _require_int(power, "amount", f"{path}.amount"),
     }
+    fields = _build_power_fields(entry, power)
+    if fields:
+        built["fields"] = fields
+    return built
 
 
 def _build_powers(powers: list, *, path: str) -> list[dict]:
