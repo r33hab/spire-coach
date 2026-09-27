@@ -117,7 +117,7 @@
     </section>
 
     <section class="card span-6">
-      <h2>Learning curve · Act 1 boss kills</h2>
+      <h2 id="boss-title">Learning curve · Act 1 boss kills</h2>
       <div id="chart-boss"></div>
       <div class="legend">
         <span><i style="border-color:var(--self)"></i>self-play runs</span>
@@ -129,7 +129,7 @@
     <section class="card span-12">
       <h2>Generations</h2>
       <div class="scroll"><table>
-        <thead><tr><th>Gen</th><th>Played by</th><th>Runs</th><th>Self-play floor</th><th>Self-play boss</th><th>Test floor (95% CI)</th><th>Test boss</th><th>Result</th><th>Took</th></tr></thead>
+        <thead><tr><th>Gen</th><th>Played by</th><th>Runs</th><th>Self-play floor</th><th id="th-sp">Self-play boss</th><th>Test floor (95% CI)</th><th id="th-test">Test boss</th><th>Result</th><th>Took</th></tr></thead>
         <tbody id="gens"><tr><td colspan="9" class="muted">No generation has finished yet.</td></tr></tbody>
       </table></div>
     </section>
@@ -166,6 +166,9 @@ const clock = (ms) => new Date(ms).toLocaleTimeString([], {hour: "2-digit", minu
 const dur = (s) => !num(s) ? "–" : s < 90 ? Math.round(s) + " s" : s < 5400 ? Math.round(s / 60) + " min" : (s / 3600).toFixed(1) + " h";
 const ago = (ms) => { const s = Math.max(0, Math.round((Date.now() - ms) / 1000)); return s < 60 ? s + " s ago" : s < 3600 ? Math.round(s / 60) + " min ago" : (s / 3600).toFixed(1) + " h ago"; };
 
+const WIN = (t) => (t.generations || []).some((g) => (g.selfplay || {}).win_rate != null || (g.eval || {}).win_rate != null)
+  || ((t.status || {}).champion || {}).eval?.win_rate != null;
+const second = (t) => WIN(t) ? {key: "win_rate", ci: "win_wilson95", label: "runs won"} : {key: "boss_kill_rate", ci: "wilson95", label: "Act 1 boss killed"};
 const PHASES = [
   ["generating", "1 · Play", "self-play runs in the simulator"],
   ["training", "2 · Learn", "fit the model on the runs"],
@@ -234,10 +237,11 @@ function renderChampion(t) {
   $("champ-name").textContent = !t.found ? "–" : ch.generation == null ? "The hand-written rules (baseline)" : `The generation ${ch.generation} model`;
   $("champ-floor").textContent = f1(e.mean_floor);
   $("champ-floor-ci").textContent = e.ci95 ? `mean floor reached · 95% CI ${f1(e.ci95[0])}–${f1(e.ci95[1])}` : "mean floor reached";
-  $("champ-boss").textContent = pct(e.boss_kill_rate);
-  $("champ-boss-ci").textContent = e.wilson95 ? `Act 1 boss killed · 95% CI ${pct(e.wilson95[0])}–${pct(e.wilson95[1])}` : "Act 1 boss killed";
+  const m = second(t);
+  $("champ-boss").textContent = pct(e[m.key]);
+  $("champ-boss-ci").textContent = e[m.ci] ? `${m.label} · 95% CI ${pct(e[m.ci][0])}–${pct(e[m.ci][1])}` : m.label;
   const asc = s.ascension != null ? `Ascension ${s.ascension}${s.ascension_stands_in_for ? ` (standing in for ${s.ascension_stands_in_for})` : ""}` : "";
-  $("champ-note").textContent = `Measured on ${e.n || 200} fixed test seeds${asc ? ", " + asc : ""}. A new model replaces it only when it is clearly better. The floor counts to 17 in Act 1; 18 means the boss died.`;
+  $("champ-note").textContent = `Measured on ${e.n || 200} fixed test seeds${asc ? ", " + asc : ""}. A new model replaces it only when it is clearly better.${WIN(t) ? " Floors count on through all three acts." : " The floor counts to 17 in Act 1; 18 means the boss died."}`;
 }
 
 function renderTotals(t) {
@@ -304,30 +308,33 @@ function renderCharts(t) {
   const gens = t.generations || [], b = t.baseline;
   const cur = (t.status || {}).generation || 0;
   chart($("chart-floor"), {
-    label: "mean floor by generation", fmt: (v) => v.toFixed(1), min: 10, max: 16, minPad: 0.6, floorMin: 1, floorMax: 18, currentGen: cur,
+    label: "mean floor by generation", fmt: (v) => v.toFixed(1), min: 10, max: 16, minPad: 0.6, floorMin: 1, floorMax: 60, currentGen: cur,
     baseline: b ? {mean: b.mean_floor, lo: (b.ci95 || [])[0], hi: (b.ci95 || [])[1]} : null,
     points: gens.map((g) => ({gen: g.generation, self: (g.selfplay || {}).mean_floor, test: (g.eval || {}).mean_floor,
       lo: ((g.eval || {}).ci95 || [])[0], hi: ((g.eval || {}).ci95 || [])[1], result: g.result})),
   });
+  const m = second(t);
+  $("boss-title").textContent = "Learning curve · " + m.label;
   chart($("chart-boss"), {
-    label: "boss kill rate by generation", fmt: (v) => (100 * v).toFixed(0) + "%", min: 0, max: 0.2, minPad: 0.03, floorMin: 0, floorMax: 1, currentGen: cur,
-    baseline: b ? {mean: b.boss_kill_rate, lo: (b.wilson95 || [])[0], hi: (b.wilson95 || [])[1]} : null,
-    points: gens.map((g) => ({gen: g.generation, self: (g.selfplay || {}).boss_kill_rate, test: (g.eval || {}).boss_kill_rate,
-      lo: ((g.eval || {}).wilson95 || [])[0], hi: ((g.eval || {}).wilson95 || [])[1], result: g.result})),
+    label: m.label + " by generation", fmt: (v) => (100 * v).toFixed(0) + "%", min: 0, max: 0.2, minPad: 0.03, floorMin: 0, floorMax: 1, currentGen: cur,
+    baseline: b ? {mean: b[m.key], lo: (b[m.ci] || [])[0], hi: (b[m.ci] || [])[1]} : null,
+    points: gens.map((g) => ({gen: g.generation, self: (g.selfplay || {})[m.key], test: (g.eval || {})[m.key],
+      lo: ((g.eval || {})[m.ci] || [])[0], hi: ((g.eval || {})[m.ci] || [])[1], result: g.result})),
   });
 }
 
 function renderGenerations(t) {
   const gens = (t.generations || []).filter((g) => g.selfplay || g.eval || g.result).slice().reverse();
+  const w = WIN(t) ? "won" : "boss"; $("th-sp").textContent = "Self-play " + w; $("th-test").textContent = "Test " + w;
   if (!gens.length) { $("gens").innerHTML = `<tr><td colspan="9" class="muted">No generation has finished yet.</td></tr>`; return; }
   $("gens").innerHTML = gens.map((g) => {
-    const sp = g.selfplay || {}, ev = g.eval || {};
+    const sp = g.selfplay || {}, ev = g.eval || {}, k = second(t).key;
     const by = sp.played_by == null ? (g.selfplay ? "rules" : "–") : `gen ${sp.played_by} model`;
     const tag = g.result === "promoted" ? `<span class="tag promoted">promoted</span>` : g.result === "rolled back" ? `<span class="tag rolled">rolled back</span>`
       : g.result ? `<span class="tag">not promoted</span>` : `<span class="tag pending">in progress</span>`;
     const ci = ev.ci95 ? ` <span class="dim">(${f1(ev.ci95[0])}–${f1(ev.ci95[1])})</span>` : "";
-    return `<tr><td>${g.generation}</td><td>${esc(by)}</td><td>${int(sp.runs)}</td><td>${f2(sp.mean_floor)}</td><td>${pct(sp.boss_kill_rate)}</td>` +
-      `<td>${f2(ev.mean_floor)}${ci}</td><td>${pct(ev.boss_kill_rate)}</td><td>${tag}</td><td>${dur(sp.seconds)}</td></tr>`;
+    return `<tr><td>${g.generation}</td><td>${esc(by)}</td><td>${int(sp.runs)}</td><td>${f2(sp.mean_floor)}</td><td>${pct(sp[k])}</td>` +
+      `<td>${f2(ev.mean_floor)}${ci}</td><td>${pct(ev[k])}</td><td>${tag}</td><td>${dur(sp.seconds)}</td></tr>`;
   }).join("");
 }
 

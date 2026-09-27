@@ -45,12 +45,24 @@ TRAINING_ROOTS = (
 PROBE_TIMEOUT_S = 0.8  # the game and the coach answer locally, well within this
 _LOG_LINES = 40
 _LOG_TAIL_BYTES = 64 * 1024
-_SUMMARY_KEYS = ("n", "mean_floor", "ci95", "boss_kill_rate", "wilson95", "mean_value")
+_SUMMARY_KEYS = (
+    "n",
+    "mean_floor",
+    "ci95",
+    "boss_kill_rate",
+    "wilson95",
+    "win_rate",
+    "win_wilson95",
+    "mean_value",
+)
 _SELFPLAY_KEYS = (
     "played_by",
     "runs",
     "boss_kills",
     "boss_kill_rate",
+    "wins",
+    "win_rate",
+    "reached_act",
     "mean_floor",
     "truncated",
     "quarantined",
@@ -239,9 +251,10 @@ def _summary(doc: Any) -> dict[str, Any] | None:
 
 
 def _pick(doc: Any, keys: tuple[str, ...]) -> dict[str, Any] | None:
+    """The `keys` that `doc` has: an Act-1 job has no win fields, a full-run job does."""
     if not isinstance(doc, dict):
         return None
-    return {key: doc.get(key) for key in keys}
+    return {key: doc[key] for key in keys if key in doc}
 
 
 def _read_json(path: Path) -> Any:
