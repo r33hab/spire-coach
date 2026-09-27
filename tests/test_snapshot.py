@@ -613,6 +613,24 @@ def test_reviving_enemy_kept_dead_enemy_dropped(combat_state):
     assert "JAW_WORM_0" in ids  # alive
 
 
+def test_a_corpse_already_showing_its_heal_is_kept_without_revive(combat_state):
+    # A mod before 2026-09-27 sent no `revive` for an Illusion or Adaptable corpse (the
+    # Obscura's Parafright, the Test Subject), though its Heal move is on display: what
+    # the mod's own `revive.in_turns` 1 reads. Session 2026-09-26 has the Parafright.
+    mutated = copy.deepcopy(combat_state)
+    guardian = next(
+        e for e in mutated["battle"]["enemies"] if e["entity_id"] == "SPHERIC_GUARDIAN_2"
+    )
+    guardian["intents"] = [
+        {"type": "Heal", "label": "", "title": "Heal", "description": "", "hits": None}
+    ]
+    guardian.pop("revive", None)
+    snapshot = build_live_snapshot(mutated, game_version=GAME_VERSION)
+    kept = next(e for e in snapshot["enemies"] if e["entity_id"] == "SPHERIC_GUARDIAN_2")
+    assert kept["hp"] == guardian["hp"]
+    assert kept["intents"][0]["type"] == "HEAL"
+
+
 # ---------------------------------------------------------------------------
 # Card cost: X-cost, and unplayable based on the card's own `unplayable` flag
 # (task-11b requirement 5), now present on every card object including pile

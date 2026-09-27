@@ -605,10 +605,22 @@ def _build_intent(intent: dict, *, path: str, warnings: list[str]) -> dict:
     }
 
 
+def _shows_heal(enemy: dict) -> bool:
+    """Whether a corpse's displayed move is a Heal: `revive.in_turns` 1 in the mod's terms.
+
+    A mod before 2026-09-27 sent no `revive` for an Illusion or Adaptable corpse (the
+    Obscura's Parafright, the Test Subject), whose power forces that Heal move on death.
+    """
+    intents = enemy.get("intents")
+    return isinstance(intents, list) and any(
+        isinstance(intent, dict) and intent.get("type") == "Heal" for intent in intents
+    )
+
+
 def _build_enemy(enemy: dict, *, path: str, warnings: list[str]) -> dict | None:
-    """None when the enemy should be dropped (dead, no revive)."""
+    """None when the enemy should be dropped (dead, and not coming back)."""
     alive = _require_bool(enemy, "alive", f"{path}.alive")
-    if not alive and not enemy.get("revive"):
+    if not alive and not enemy.get("revive") and not _shows_heal(enemy):
         return None
 
     entity_id = _require_str(enemy, "entity_id", f"{path}.entity_id")
