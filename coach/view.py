@@ -65,12 +65,13 @@ class StrategyShown(Protocol):
     `_StrategyPosition`). `status`: "pending" (asked, no answer yet), "blocked"
     (advice is off), "unreadable" (no map cached yet this act: 3.5 needs one), "done"
     (`result` is the engine's answer, or None: no champion is exported), "failed" (the
-    engine call raised)."""
+    engine call raised). `act` is the run's act the screen settled on."""
 
     status: str
     state_type: str | None
     result: StrategyResult | None
     error: str | None
+    act: int | None
 
 
 def compose(
@@ -152,6 +153,9 @@ def compose(
     return shown("advice", _advice_text(position, recommendation), recommendation)
 
 
+_NO_ACT1_STRATEGY_NOTE = "No between-fight advice outside Act 1 yet"
+
+
 def _strategy_dict(strategy: StrategyShown | None) -> dict | None:
     """The panel's non-combat counterpart to `_recommendation`: the champion's ranked
     options, best first, each with its value's gap to the best, and the boss win
@@ -161,6 +165,11 @@ def _strategy_dict(strategy: StrategyShown | None) -> dict | None:
         return None
     base = {"screen": strategy.state_type, "options": None, "boss_win_chance": None, "model": None}
     if strategy.status == "failed":
+        # The strategy champion is trained on Act 1 only, so every Act 2-3 screen fails
+        # (UnknownIdError: map.boss.id, among others) -- not a bug the panel should show
+        # as one. An Act 1 failure is still a real one and keeps its own message.
+        if strategy.act is not None and strategy.act != 1:
+            return {**base, "status": "failed", "error": sentence(_NO_ACT1_STRATEGY_NOTE)}
         return {
             **base,
             "status": "failed",
