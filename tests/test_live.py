@@ -1930,6 +1930,30 @@ def test_a_non_combat_screen_asks_the_engine_and_shows_ranked_options_with_gaps(
     assert latest(published).recommendation is None
 
 
+def test_the_service_label_names_an_option_when_it_gives_one(make_session):
+    result = StrategyResult(
+        options=[
+            {
+                "option": {"kind": "map.node", "node": [3, 1, 1]},
+                "label": "Elite (col 3)",
+                "value": 17.5,
+                "p_boss": 0.24,
+            },
+            {"option": {"kind": "map.node", "node": [0, 1, 1]}, "value": 16.3, "p_boss": 0.17},
+        ],
+        model={"generation": 12},
+    )
+    bridge = FakeBridge()
+    engine = FakeEngine(standard_analysis, strategize=lambda live_run, decision: result)
+    session, published = make_session(bridge, engine)
+
+    settle(session, bridge, map_screen())
+    step_until(session, strategy_shown(published))
+
+    labels = [o["label"] for o in latest(published).strategy["options"]]
+    assert labels == ["Elite (col 3)", "map.node: node [0, 1, 1]"]
+
+
 def test_a_failed_strategy_call_outside_act_1_shows_the_panel_note(make_session):
     # 3.5's strategy champion is trained on Act 1 only, so every Act 2-3 screen fails
     # (UnknownIdError: map.boss.id, among others); the panel shows that as a known gap,

@@ -195,12 +195,13 @@ def _strategy_options(options: list[dict]) -> list[dict]:
     values = [_finite(option.get("value")) for option in options]
     best_value = next((value for value in values if value is not None), None)
     result = []
-    for option, value in zip(options, values):
+    for option, value in zip(options, values, strict=True):
         gap = best_value - value if best_value is not None and value is not None else None
         descriptor = option.get("option") or {}
         result.append(
             {
-                "label": _strategy_option_label(descriptor),
+                # The service names cards, relics and potions; our own label is the fallback.
+                "label": option.get("label") or _strategy_option_label(descriptor),
                 "value": value,
                 "p_boss": _finite(option.get("p_boss")),
                 "gap": gap,
