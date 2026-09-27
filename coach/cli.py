@@ -325,6 +325,7 @@ def cmd_mod_enable(backup_root: Path, *, is_running: Callable[[], bool] = game_i
 def cmd_dashboard(config: Config, *, port: int, root: Path, open_browser: bool) -> int:
     """Serve the dashboard on 127.0.0.1:`port` until Ctrl-C (read-only; see coach.dashboard)."""
     with socket.socket() as probe:  # uvicorn exits silently on a taken port: say it first
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # as uvicorn binds
         try:
             probe.bind((HOST, port))
         except OSError:
