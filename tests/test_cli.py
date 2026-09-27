@@ -138,6 +138,63 @@ def test_mod_install_dispatches_with_a_custom_repo(monkeypatch, tmp_path):
     assert calls == [(config, custom_repo)]
 
 
+def test_fidelity_scoreboard_dispatches_with_the_defaults(monkeypatch, tmp_path):
+    config = make_config(tmp_path)
+    monkeypatch.setattr(cli, "load_config", lambda: config)
+    calls = []
+    monkeypatch.setattr(
+        cli, "cmd_fidelity_scoreboard", lambda cfg, **kw: calls.append((cfg, kw)) or 0
+    )
+
+    assert cli.main(["fidelity-scoreboard"]) == 0
+    assert calls == [
+        (
+            config,
+            {
+                "sts2_repo": cli.fidelity_scoreboard.DEFAULT_STS2_REPO,
+                "runs_dir": None,
+                "out_dir": None,
+                "resamples": None,
+            },
+        )
+    ]
+
+
+def test_fidelity_scoreboard_dispatches_with_every_option_given(monkeypatch, tmp_path):
+    config = make_config(tmp_path)
+    monkeypatch.setattr(cli, "load_config", lambda: config)
+    calls = []
+    monkeypatch.setattr(
+        cli, "cmd_fidelity_scoreboard", lambda cfg, **kw: calls.append((cfg, kw)) or 0
+    )
+    sts2_repo = tmp_path / "sts2-fork"
+    runs_dir = tmp_path / "runs"
+    out_dir = tmp_path / "out"
+
+    assert (
+        cli.main(
+            [
+                "fidelity-scoreboard",
+                "--sts2-repo",
+                str(sts2_repo),
+                "--runs-dir",
+                str(runs_dir),
+                "--out-dir",
+                str(out_dir),
+                "--resamples",
+                "32",
+            ]
+        )
+        == 0
+    )
+    assert calls == [
+        (
+            config,
+            {"sts2_repo": sts2_repo, "runs_dir": runs_dir, "out_dir": out_dir, "resamples": 32},
+        )
+    ]
+
+
 def test_mod_enable_dispatches_with_the_default_backup_root(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "load_config", lambda: make_config(tmp_path))
     calls = []
@@ -178,9 +235,7 @@ def test_cmd_saves_seed_modded_prints_the_backup_and_written_paths(tmp_path, mon
     make_save_tree(tmp_path)
     monkeypatch.setattr(cli, "SAVE_ROOT", tmp_path / "steam")
 
-    result = cli.cmd_saves_seed_modded(
-        tmp_path / "backups", 1, 1, is_running=never_running
-    )
+    result = cli.cmd_saves_seed_modded(tmp_path / "backups", 1, 1, is_running=never_running)
 
     assert result == 0
     out = capsys.readouterr().out
@@ -498,9 +553,7 @@ def test_doctor_survives_client_factory_itself_raising(tmp_path):
     assert len(checks) == 9
     lines = [line for _, line in checks]
     assert lines[0] == "✓ game dir exists"  # earlier checks still ran
-    assert any(
-        line.startswith("✗ hello reachable: could not create a client") for line in lines
-    )
+    assert any(line.startswith("✗ hello reachable: could not create a client") for line in lines)
     assert lines[-2] == "✗ auth accepted: not checked (hello unreachable)"
     assert lines[-1] == "✗ versions ok: not checked (hello unreachable)"
     assert not all(ok for ok, _ in checks)
@@ -670,9 +723,7 @@ def test_save_error_at_the_boundary_is_one_line_and_exit_1(monkeypatch, tmp_path
     result = cli.main(["saves", "backup"])
 
     assert result == 1
-    assert_one_clean_line(
-        capsys.readouterr(), "Slay the Spire 2 is running; close the game first"
-    )
+    assert_one_clean_line(capsys.readouterr(), "Slay the Spire 2 is running; close the game first")
 
 
 def test_install_error_at_the_boundary_is_one_line_and_exit_1(monkeypatch, tmp_path, capsys):

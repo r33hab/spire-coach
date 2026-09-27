@@ -198,6 +198,111 @@ def test_model_info_reads_the_export(tmp_path: Path) -> None:
     assert got["generation"] == 4 and got["eval"] == RULES_EVAL and "eval_meta" not in got
 
 
+def _scoreboard_doc(
+    generated_at: str, *, commit: str = "abc123", act1: tuple[int, int, int, int] = (62, 46, 46, 0)
+) -> dict:
+    """A scoreboard JSON doc (`coach.fidelity_scoreboard.build_scoreboard`'s shape),
+    trimmed to what `collect_fidelity` and the dashboard page read."""
+    replayed, comparable, matched, mismatched = act1
+    return {
+        "generated_at": generated_at,
+        "resamples": 16,
+        "sts2": {"repo": "/x/sts2", "commit": commit, "branch": "m1-scoreboard"},
+        "sessions": [],
+        "totals": {
+            "act 1": {
+                "categories": {},
+                "totals": {
+                    "replayed": replayed,
+                    "comparable": comparable,
+                    "matched": matched,
+                    "mismatched": mismatched,
+                    "not_comparable": replayed - comparable,
+                    "mismatch_fields": {},
+                    "reasons": [],
+                },
+            }
+        },
+    }
+
+
+def test_collect_fidelity_reports_not_found_without_latest_json(tmp_path: Path) -> None:
+    assert dashboard.collect_fidelity(tmp_path) == {"found": False, "root": str(tmp_path)}
+
+
+def test_collect_fidelity_reads_the_latest_run_and_the_trend(tmp_path: Path) -> None:
+    fidelity_dir = tmp_path / "fidelity"
+    older = _scoreboard_doc("2026-09-26T10:00:00", commit="aaa111", act1=(69, 8, 8, 0))
+    newer = _scoreboard_doc("2026-09-27T18:00:00", commit="bbb222", act1=(62, 46, 46, 0))
+    _write(fidelity_dir / "20260926-100000.json", older)
+    _write(fidelity_dir / "20260927-180000.json", newer)
+    _write(fidelity_dir / "latest.json", newer)
+
+    got = dashboard.collect_fidelity(fidelity_dir)
+
+    assert got["found"] is True
+    assert got["root"] == str(fidelity_dir)
+    assert got["latest"] == newer
+    assert [point["generated_at"] for point in got["trend"]] == [
+        "2026-09-26T10:00:00",
+        "2026-09-27T18:00:00",
+    ]
+    assert got["trend"][1]["commit"] == "bbb222"
+    assert got["trend"][1]["acts"]["act 1"] == {
+        "replayed": 62,
+        "comparable": 46,
+        "matched": 46,
+        "mismatched": 0,
+        "not_comparable": 16,
+    }
+
+
+def test_collect_fidelity_trend_is_capped_at_trend_limit(tmp_path: Path) -> None:
+    fidelity_dir = tmp_path / "fidelity"
+    for i in range(5):
+        _write(fidelity_dir / f"2026092{i}-000000.json", _scoreboard_doc(f"2026-09-2{i}T00:00:00"))
+    _write(fidelity_dir / "latest.json", _scoreboard_doc("2026-09-24T00:00:00"))
+
+    got = dashboard.collect_fidelity(fidelity_dir, trend_limit=2)
+
+    assert len(got["trend"]) == 2
+    assert got["trend"][-1]["generated_at"] == "2026-09-24T00:00:00"
+
+
+def test_collect_fidelity_skips_an_unreadable_run_in_the_trend(tmp_path: Path) -> None:
+    fidelity_dir = tmp_path / "fidelity"
+    good = _scoreboard_doc("2026-09-27T18:00:00")
+    _write(fidelity_dir / "20260927-180000.json", good)
+    fidelity_dir.mkdir(parents=True, exist_ok=True)
+    (fidelity_dir / "20260926-100000.json").write_text("{not json")
+    _write(fidelity_dir / "latest.json", good)
+
+    got = dashboard.collect_fidelity(fidelity_dir)
+
+    assert len(got["trend"]) == 1
+    assert got["trend"][0]["generated_at"] == "2026-09-27T18:00:00"
+
+
+def test_snapshot_source_includes_the_fidelity_scoreboard(tmp_path: Path) -> None:
+    fidelity_dir = tmp_path / "fidelity"
+    doc = _scoreboard_doc("2026-09-27T18:00:00")
+    _write(fidelity_dir / "latest.json", doc)
+    snapshot = dashboard.snapshot_source(
+        tmp_path, _FakeMod(up=False), tmp_path / "model.json", fidelity_dir=fidelity_dir
+    )
+
+    got = snapshot()
+
+    assert got["fidelity"]["found"] is True
+    assert got["fidelity"]["latest"] == doc
+
+
+def test_snapshot_source_without_a_fidelity_dir_reports_not_found(tmp_path: Path) -> None:
+    snapshot = dashboard.snapshot_source(tmp_path, _FakeMod(up=False), tmp_path / "model.json")
+
+    assert snapshot()["fidelity"] == {"found": False, "root": None}
+
+
 def test_the_app_serves_the_page_and_the_snapshot_only_to_itself(tmp_path: Path) -> None:
     app = dashboard.create_app(lambda: {"training": {"found": False}, "value": float("nan")})
     with TestClient(app, base_url="http://127.0.0.1:15531") as client:
