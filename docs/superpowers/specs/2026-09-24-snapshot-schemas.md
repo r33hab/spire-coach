@@ -36,7 +36,7 @@ JSON. Strings use the game's `ModelId.Entry` form in UPPER_SNAKE_CASE with no ca
     "gold": 99, "stars": 0,
     "osty": null,                       // {"hp": int, "max_hp": int} for Necrobinder
     "orbs": {"slots": 0, "list": []},   // list items: {"id": "LIGHTNING_ORB", "passive": int, "evoke": int}
-    "powers": [{"id": "STRENGTH_POWER", "amount": 2}],   // real stack counts
+    "powers": [{"id": "STRENGTH_POWER", "amount": 2}],   // real stack counts; a power may carry "fields" (1.2)
     "relics": [{"id": "BURNING_BLOOD", "counter": null, "fields": {}}], // counter as shown by the game (null if none); fields = primitive instance fields of the relic object (flags like "used this combat")
     "potions": [{"slot": 0, "id": "FIRE_POTION"}, {"slot": 1, "id": null}],
     "max_potion_slots": 3
@@ -108,6 +108,24 @@ Adapter rule for the coach (`coach/snapshot.py`): translate whatever raw per-car
 ```
 
 Amended 2026-09-24 (ledger ruling, stage0 Task 11 findings). The mod reports in-combat hand, grid and choose-a-card overlays with the battle block, the selection's source, min/max and prompt key (mod Task 6c), and the coach's builder fills this object from them (coach Task 11b). `kind` is the SCREEN SHAPE, not a game enum: the game has no selection-kind enum. The converter derives the emulator's `CardSelectionKind` from `source_*` plus `kind`/`pile`, and warns when it cannot.
+
+
+### 1.2 Power fields
+
+Amended 2026-09-27 (Milestone 1, task A2). A power object, the player's or an enemy's, may carry `fields`: the state the power keeps beside its amount, which the simulator needs and no amount can carry. Only these keys exist, each only on its power:
+
+| Power | Key | Value |
+|---|---|---|
+| `SKITTISH_POWER` | `has_gained_block_this_turn` | bool: it has already gained its block this turn |
+| `SURROUNDED_POWER` | `facing` | `"Right"` or `"Left"`: which way the player faces |
+| `POSSESS_SPEED_POWER`, `POSSESS_STRENGTH_POWER` | `stolen` | int ≥ 0: the Dexterity or Strength it has taken from the player so far |
+| `SWIPE_POWER` | `stolen_card`, `stolen_card_upgraded` | the stolen card's id (null if none) and whether it is upgraded |
+
+```jsonc
+{"id": "SURROUNDED_POWER", "amount": 1, "fields": {"facing": "Left"}}
+```
+
+`fields` is optional and left out when it would be empty; a missing key means unknown, and the converter warns about what that leaves out. All of it is on screen: the block Skittish gains, the player's facing, the debuffs a Possess power applied, and the stolen card in Swipe's tooltip. The mod reports the same keys under power `fields`; for `SWIPE_POWER` the coach falls back to the tooltip's card (`keywords[].id` `"CARD.<ENTRY>"`, `+` when upgraded) when a mod sends no fields.
 
 ---
 
