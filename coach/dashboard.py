@@ -147,12 +147,54 @@ def model_info(path: Path) -> dict[str, Any] | None:
     return info
 
 
+_TREND_ACT_KEYS = ("replayed", "comparable", "matched", "mismatched", "not_comparable")
+DEFAULT_TREND_LIMIT = 30  # scoreboard runs kept in the trend; the chart reads oldest to newest
+
+
+def collect_fidelity(
+    fidelity_dir: Path, *, trend_limit: int = DEFAULT_TREND_LIMIT
+) -> dict[str, Any]:
+    """The fidelity scoreboard's snapshot (`coach.fidelity_scoreboard`, roadmap task A1):
+    the latest run in full (`data/fidelity/latest.json`), and a trend across the runs
+    before it -- a few numbers per act, not each one's full category and reason detail,
+    which stays in the files themselves for anyone who wants it."""
+    latest = _read_json(fidelity_dir / "latest.json")
+    if not isinstance(latest, dict):
+        return {"found": False, "root": str(fidelity_dir)}
+    runs = sorted(p for p in fidelity_dir.glob("*.json") if p.name != "latest.json")
+    trend = [point for point in (_trend_point(path) for path in runs[-trend_limit:]) if point]
+    return {"found": True, "root": str(fidelity_dir), "latest": latest, "trend": trend}
+
+
+def _trend_point(path: Path) -> dict[str, Any] | None:
+    doc = _read_json(path)
+    if not isinstance(doc, dict):
+        return None
+    totals = doc.get("totals")
+    acts = (
+        {
+            act: _pick(bucket.get("totals"), _TREND_ACT_KEYS)
+            for act, bucket in totals.items()
+            if isinstance(bucket, dict)
+        }
+        if isinstance(totals, dict)
+        else {}
+    )
+    sts2 = doc.get("sts2") if isinstance(doc.get("sts2"), dict) else {}
+    return {
+        "generated_at": doc.get("generated_at"),
+        "commit": sts2.get("commit"),
+        "acts": acts,
+    }
+
+
 def snapshot_source(
     root: Path,
     client: ModClient,
     model_path: Path,
     *,
     panel_port: int = PANEL_PORT,
+    fidelity_dir: Path | None = None,
 ) -> Callable[[], dict[str, Any]]:
     """What `/api/dashboard` answers: a fresh snapshot of everything on each call."""
 
@@ -163,6 +205,11 @@ def snapshot_source(
             "game": game_status(client),
             "coach": coach_status(panel_port),
             "model": model_info(model_path),
+            "fidelity": (
+                collect_fidelity(fidelity_dir)
+                if fidelity_dir is not None
+                else {"found": False, "root": None}
+            ),
         }
 
     return snapshot

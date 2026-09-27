@@ -25,7 +25,7 @@ from pathlib import Path
 
 import uvicorn
 
-from coach import dashboard
+from coach import dashboard, fidelity_scoreboard
 from coach.bridge.client import BridgeAuthError, BridgeError, ModClient
 from coach.bridge.versions import VersionStatus, check_versions, read_game_version
 from coach.capture import capture_loop
@@ -92,9 +92,7 @@ def _doctor_checks(
 
     game_version = read_game_version(release_info)
     if game_version is None:
-        checks.append(
-            (False, "✗ game version: unknown (release_info.json missing or unreadable)")
-        )
+        checks.append((False, "✗ game version: unknown (release_info.json missing or unreadable)"))
     elif game_version != EXPECTED_GAME_VERSION:
         checks.append(
             (
@@ -137,9 +135,7 @@ def _doctor_checks(
         settings = json.loads((steam_dir / "settings.save").read_text(encoding="utf-8"))
         mod_settings = settings.get("mod_settings", {}) if isinstance(settings, dict) else {}
         mod_list = mod_settings.get("mod_list", []) if isinstance(mod_settings, dict) else []
-        entry = next(
-            (e for e in mod_list if isinstance(e, dict) and e.get("id") == MOD_ID), None
-        )
+        entry = next((e for e in mod_list if isinstance(e, dict) and e.get("id") == MOD_ID), None)
         enabled = (
             isinstance(mod_settings, dict)
             and mod_settings.get("mods_enabled") is True
@@ -336,7 +332,10 @@ def cmd_dashboard(config: Config, *, port: int, root: Path, open_browser: bool) 
             return 1
     client = ModClient(config.base_url, config.token, timeout_s=dashboard.PROBE_TIMEOUT_S)
     model_path = config.data_dir / "models" / "strategy" / "model.json"
-    app = dashboard.create_app(dashboard.snapshot_source(root, client, model_path))
+    fidelity_dir = config.data_dir / "fidelity"
+    app = dashboard.create_app(
+        dashboard.snapshot_source(root, client, model_path, fidelity_dir=fidelity_dir)
+    )
     server = create_server(app, port=port)
     url = f"http://{HOST}:{port}/"
     _say(f"The dashboard is at {url} (training job: {root})")
@@ -347,6 +346,27 @@ def cmd_dashboard(config: Config, *, port: int, root: Path, open_browser: bool) 
         server.run()
     finally:
         client.close()
+    return 0
+
+
+def cmd_fidelity_scoreboard(
+    config: Config,
+    *,
+    sts2_repo: Path,
+    runs_dir: Path | None,
+    out_dir: Path | None,
+    resamples: int | None,
+) -> int:
+    """Score the simulator against every captured session (see coach.fidelity_scoreboard)."""
+    runs_dir = runs_dir or (config.data_dir / "runs")
+    out_dir = out_dir or (config.data_dir / "fidelity")
+    if not fidelity_scoreboard.discover_sessions(runs_dir):
+        _say(f"No session logs found under {runs_dir}.", error=True)
+        return 1
+    doc = fidelity_scoreboard.build_scoreboard(runs_dir, sts2_repo, resamples=resamples)
+    stamped, latest = fidelity_scoreboard.write_scoreboard(doc, out_dir)
+    _say(fidelity_scoreboard.format_table(doc))
+    _say(f"\nWrote {stamped} and {latest}")
     return 0
 
 
@@ -729,6 +749,32 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-open", action="store_true", help="do not open the page in the browser"
     )
 
+    fidelity_parser = subparsers.add_parser(
+        "fidelity-scoreboard",
+        help="score the simulator against every captured session (roadmap task A1)",
+    )
+    fidelity_parser.add_argument(
+        "--sts2-repo",
+        type=Path,
+        default=fidelity_scoreboard.DEFAULT_STS2_REPO,
+        help="the sts2 checkout to score against (default: %(default)s)",
+    )
+    fidelity_parser.add_argument(
+        "--runs-dir", type=Path, default=None, help="session logs (default: <data dir>/runs)"
+    )
+    fidelity_parser.add_argument(
+        "--out-dir",
+        type=Path,
+        default=None,
+        help="where to write the scoreboard (default: <data dir>/fidelity)",
+    )
+    fidelity_parser.add_argument(
+        "--resamples",
+        type=int,
+        default=None,
+        help="resamples per check (default: the sts2 checkout's own default)",
+    )
+
     return parser
 
 
@@ -778,6 +824,14 @@ def main(argv: list[str] | None = None) -> int:
                 port=args.port,
                 root=args.training_root or dashboard.training_root(),
                 open_browser=not args.no_open,
+            )
+        if args.command == "fidelity-scoreboard":
+            return cmd_fidelity_scoreboard(
+                config,
+                sts2_repo=args.sts2_repo,
+                runs_dir=args.runs_dir,
+                out_dir=args.out_dir,
+                resamples=args.resamples,
             )
     except BridgeAuthError as exc:
         print(str(exc), file=sys.stderr)

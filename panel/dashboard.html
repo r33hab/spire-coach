@@ -149,6 +149,21 @@
       <pre id="log"></pre>
       <div class="explain" id="log-where"></div>
     </section>
+
+    <section class="card span-8" id="fidelity-card">
+      <h2>Simulator fidelity</h2>
+      <div class="explain" id="fidelity-meta"></div>
+      <div class="scroll"><table>
+        <thead><tr><th>Act</th><th>Replayed</th><th>Comparable</th><th>Matched</th><th>Mismatched</th><th>Not comp.</th><th>Comparable %</th><th>Match %</th></tr></thead>
+        <tbody id="fidelity-table"></tbody>
+      </table></div>
+    </section>
+
+    <section class="card span-4">
+      <h2>Fidelity trend · comparable rate</h2>
+      <div id="fidelity-chart"></div>
+      <div class="legend" id="fidelity-legend"></div>
+    </section>
   </div>
 </main>
 <script>
@@ -376,11 +391,70 @@ function renderLog(t) {
   $("log-where").innerHTML = t.root ? `Job folder: <code>${esc(t.root)}</code>` : "";
 }
 
+const FIDELITY_ACT_COLORS = {"act 1": "#7aa7e8", "act 2": "#5cc98e", "act 3": "#f1c350"};
+const FIDELITY_OTHER_COLORS = ["#e5574d", "#939fb1", "#c98ee5"];
+const fidelityActColor = (act, i) => FIDELITY_ACT_COLORS[act] || FIDELITY_OTHER_COLORS[i % FIDELITY_OTHER_COLORS.length];
+
+function fidelityChart(el, trend, acts) {
+  const W = 320, H = 220, L = 34, R = 10, T = 10, B = 22;
+  const n = trend.length;
+  if (n < 2) {
+    el.innerHTML = `<svg viewBox="0 0 ${W} ${H}"><text x="${W / 2}" y="${H / 2}" fill="#939fb1" font-size="12" text-anchor="middle">Appears once the scoreboard has run more than once.</text></svg>`;
+    return;
+  }
+  const x = (i) => L + (W - L - R) * (i / (n - 1));
+  const y = (v) => T + (H - T - B) * (1 - v);
+  let s = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="comparable rate over scoreboard runs">`;
+  for (let i = 0; i <= 4; i++) {
+    const v = i / 4, yy = y(v);
+    s += `<line x1="${L}" x2="${W - R}" y1="${yy}" y2="${yy}" stroke="#222c3b"/>`;
+    s += `<text x="${L - 6}" y="${yy + 4}" fill="#6d798b" font-size="10" text-anchor="end">${Math.round(100 * v)}%</text>`;
+  }
+  acts.forEach((act, i) => {
+    const color = fidelityActColor(act, i);
+    const pts = [];
+    trend.forEach((p, idx) => {
+      const a = (p.acts || {})[act];
+      if (a && a.replayed) pts.push({x: x(idx), y: y(a.comparable / a.replayed)});
+    });
+    if (pts.length > 1) s += `<polyline fill="none" stroke="${color}" stroke-width="2" points="${pts.map((p) => `${p.x},${p.y}`).join(" ")}"/>`;
+    pts.forEach((p) => { s += `<circle cx="${p.x}" cy="${p.y}" r="3" fill="${color}"/>`; });
+  });
+  el.innerHTML = s + "</svg>";
+}
+
+function renderFidelity(f) {
+  if (!f || !f.found) {
+    $("fidelity-meta").innerHTML = `No scoreboard run yet. Run <code>spire-coach fidelity-scoreboard</code>.`;
+    $("fidelity-table").innerHTML = `<tr><td colspan="8" class="muted">No scoreboard run yet.</td></tr>`;
+    $("fidelity-chart").innerHTML = "";
+    $("fidelity-legend").innerHTML = "";
+    return;
+  }
+  const latest = f.latest, totals = latest.totals || {};
+  const acts = Object.keys(totals).sort();
+  const sts2 = latest.sts2 || {};
+  const commit = sts2.commit ? sts2.commit.slice(0, 10) : "?";
+  const sessionCount = (latest.sessions || []).length;
+  $("fidelity-meta").textContent = `sts2 ${commit}${sts2.branch ? " (" + sts2.branch + ")" : ""} · ${sessionCount} session(s) · generated ${latest.generated_at ? new Date(latest.generated_at).toLocaleString() : "–"}`;
+  $("fidelity-table").innerHTML = acts.map((act) => {
+    const b = totals[act].totals;
+    const compRate = b.replayed ? b.comparable / b.replayed : null;
+    const matchRate = b.comparable ? b.matched / b.comparable : null;
+    return `<tr><td>${esc(act)}</td><td>${int(b.replayed)}</td><td>${int(b.comparable)}</td><td>${int(b.matched)}</td>` +
+      `<td>${int(b.mismatched)}</td><td>${int(b.not_comparable)}</td><td>${pct(compRate)}</td><td>${pct(matchRate)}</td></tr>`;
+  }).join("") || `<tr><td colspan="8" class="muted">No acts recorded.</td></tr>`;
+  fidelityChart($("fidelity-chart"), f.trend || [], acts);
+  $("fidelity-legend").innerHTML = acts.map((act, i) =>
+    `<span><i style="border-color:${fidelityActColor(act, i)}"></i>${esc(act)}</span>`
+  ).join("");
+}
+
 function render(d) {
   lastData = d;
   const t = d.training || {};
   renderChips(d); renderNow(t); renderChampion(t); renderTotals(t); renderCharts(t); renderGenerations(t);
-  renderCoach(d.coach || {}); renderModel(d.model); renderLog(t);
+  renderCoach(d.coach || {}); renderModel(d.model); renderLog(t); renderFidelity(d.fidelity);
 }
 
 async function tick() {
