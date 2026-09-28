@@ -328,6 +328,51 @@ def leave_run(client: ModClient, state: dict, *, timeout_s: float = _DEFAULT_TIM
     return poll_until(client, lambda s: s.get("state_type") == "menu", timeout_s=timeout_s)
 
 
+# --- navigation actions that start a room/screen transition -------------------------
+
+
+def act_and_await_change(
+    client: ModClient,
+    action: dict,
+    baseline: dict,
+    *,
+    timeout_s: float = _DEFAULT_TIMEOUT_S,
+    poll_s: float = _DEFAULT_POLL_S,
+) -> dict:
+    """Post a navigation action (`choose_map_node`, or any action that starts a
+    room/screen transition), then wait for proof it was actually seen -- a different
+    `state_type`, or a higher `action_log_seq`, than `baseline`'s -- with
+    `is_resolving` false, before returning.
+
+    `is_resolving` alone does not cover this: it tracks combat/action resolution
+    (`coach.bridge.decisions.is_settled`), not a room transition, so a read taken
+    right after `post_action` can still be the pre-click snapshot. Confirmed live
+    twice (autopilot-20260929-000347.jsonl, the newest autopilot-*.jsonl): acting on
+    that stale read is what sent a second navigation action into a transition already
+    under way, which is what opened the map overlay over a just-started fight and
+    jammed the game (bug 3/7 and bug 4/7 are the same race). Times out returning the
+    last state read either way, same as `poll_until`; raises only when `post_action`
+    itself does, same as calling it bare, so each caller's own error handling for a
+    failed post is unchanged -- only a read taken *during* the wait is ever retried.
+    """
+    client.post_action(action)
+    before_type = baseline.get("state_type")
+    before_seq = baseline.get("action_log_seq")
+    deadline = time.monotonic() + timeout_s
+    state = client.get_state()
+    while True:
+        seq = state.get("action_log_seq")
+        changed = state.get("state_type") != before_type or (
+            isinstance(seq, int) and isinstance(before_seq, int) and seq != before_seq
+        )
+        if changed and not state.get("is_resolving"):
+            return state
+        if time.monotonic() > deadline:
+            return state
+        time.sleep(poll_s)
+        state = client.get_state()
+
+
 # --- generic non-combat fallback ---------------------------------------------------
 
 
@@ -389,7 +434,12 @@ def advance_one_step(client: ModClient, state: dict, *, runlog: RunLog | None = 
         pick = next((o for o in options if o.get("type") in ("Monster", "Elite")), None)
         pick = pick or (options[0] if options else None)
         if pick is not None:
-            _try(client, {"action": "choose_map_node", "index": pick["index"]})
+            try:
+                return act_and_await_change(
+                    client, {"action": "choose_map_node", "index": pick["index"]}, state
+                )
+            except BridgeError:
+                pass
     elif state_type == "treasure":
         _try(client, {"action": "claim_treasure_relic", "index": 0})
         _try(client, {"action": "proceed"})

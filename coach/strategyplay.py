@@ -42,6 +42,7 @@ to check it against, so getting either wrong risks a silently-accepted bad actio
 
 from __future__ import annotations
 
+from coach import navigator
 from coach.bridge.client import BridgeError, ModClient
 from coach.engine import StrategyResult
 
@@ -126,7 +127,11 @@ def _map_node(client: ModClient, state: dict, option: dict) -> bool:
         index = candidate.get("index") if candidate else None
     if index is None:
         return False
-    return _post(client, {"action": "choose_map_node", "index": index})
+    # bug 3&4/7: waits for proof the click was seen before this decision is treated as
+    # done, instead of firing choose_map_node and letting the caller act again on a
+    # read that can still be the room the click has not actually left yet.
+    navigator.act_and_await_change(client, {"action": "choose_map_node", "index": index}, state)
+    return True
 
 
 def _node_type_name(node: object) -> str | None:

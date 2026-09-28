@@ -221,6 +221,19 @@ def _play_run(
 def _play_screen(
     client: ModClient, engine: EngineClient, tracker: LiveRunTracker, state: dict, runlog: RunLog
 ) -> None:
+    if state.get("state_type") == "map" and _has_one_map_option(state):
+        # No real decision to make (and one less round trip through the strategy
+        # service that can fail with things like "NotReadyError: the current map
+        # position is not known", seen live on an Act 2 map): choose the only option
+        # directly. A failed click still falls through to the strategy/fallback path.
+        options = (state.get("map") or {}).get("next_options") or []
+        try:
+            navigator.act_and_await_change(
+                client, {"action": "choose_map_node", "index": options[0]["index"]}, state
+            )
+            return
+        except BridgeError:
+            pass
     live_run, screen = tracker.build(state)
     result = None
     if live_run is not None:
@@ -233,6 +246,10 @@ def _play_screen(
     if result is not None and strategyplay.execute_best_option(client, state, result):
         return
     navigator.advance_one_step(client, state, runlog=runlog)
+
+
+def _has_one_map_option(state: dict) -> bool:
+    return len((state.get("map") or {}).get("next_options") or []) == 1
 
 
 def _recover(client: ModClient) -> None:

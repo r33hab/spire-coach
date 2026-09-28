@@ -13,6 +13,7 @@ from coach.bridge.client import BridgeError
 from coach.config import CONF_FILE_NAME, Config
 from coach.navigator import (
     NavigatorError,
+    act_and_await_change,
     act_of,
     advance_one_step,
     apply_hp_buffer,
@@ -297,6 +298,81 @@ def test_apply_hp_buffer_includes_extra_log_fields(tmp_path):
     assert lines[-1]["payload"] == {"target_hp": 500, "delta": 420, "encounter": "KaiserCrabBoss"}
 
 
+# --- act_and_await_change (bug 3&4/7: the stale-read race that jams the game) -------
+
+
+class _SequencedClient:
+    """`get_state()` returns each of `reads` in turn, repeating the last one once
+    exhausted; `post_action` just records what was posted."""
+
+    def __init__(self, reads: list[dict]) -> None:
+        self._reads = reads
+        self._i = 0
+        self.posted: list[dict] = []
+
+    def get_state(self) -> dict:
+        state = self._reads[min(self._i, len(self._reads) - 1)]
+        self._i += 1
+        return state
+
+    def post_action(self, action: dict, **kwargs) -> dict:
+        self.posted.append(action)
+        return {"status": "ok"}
+
+
+def test_act_and_await_change_waits_past_a_stale_read_after_the_click():
+    # Confirmed live (autopilot-20260929-000347.jsonl, the newest autopilot-*.jsonl):
+    # the read right after choose_map_node can still be the pre-click snapshot --
+    # is_resolving false does not by itself prove the click was seen, since it does
+    # not cover a room transition at all. Acting on that stale read is what sent a
+    # second navigation action into a transition already under way and jammed the
+    # game. Must keep waiting past it rather than trusting the first read.
+    baseline = {"state_type": "map", "action_log_seq": 5, "is_resolving": False}
+    stale = {"state_type": "map", "action_log_seq": 5, "is_resolving": False}  # == baseline
+    settled = {"state_type": "monster", "action_log_seq": 6, "is_resolving": False}
+    client = _SequencedClient([stale, settled])
+
+    result = act_and_await_change(client, {"action": "choose_map_node", "index": 0}, baseline)
+
+    assert result == settled
+    assert client.posted == [{"action": "choose_map_node", "index": 0}]  # never double-clicked
+
+
+def test_act_and_await_change_waits_out_is_resolving_even_after_the_seq_changes():
+    baseline = {"state_type": "map", "action_log_seq": 5, "is_resolving": False}
+    mid_transition = {"state_type": "map", "action_log_seq": 6, "is_resolving": True}
+    settled = {"state_type": "monster", "action_log_seq": 6, "is_resolving": False}
+    client = _SequencedClient([mid_transition, settled])
+
+    result = act_and_await_change(client, {"action": "choose_map_node", "index": 0}, baseline)
+
+    assert result == settled
+
+
+def test_act_and_await_change_gives_up_after_timeout_and_returns_the_last_read():
+    stale = {"state_type": "map", "action_log_seq": 5, "is_resolving": False}
+    client = _SequencedClient([stale])
+
+    result = act_and_await_change(
+        client,
+        {"action": "choose_map_node", "index": 0},
+        {"state_type": "map", "action_log_seq": 5},
+        timeout_s=0.05,
+        poll_s=0.01,
+    )
+
+    assert result == stale
+
+
+def test_act_and_await_change_propagates_a_bridge_error_from_the_post_itself():
+    class RaisingClient:
+        def post_action(self, action, **kwargs):
+            raise BridgeError("mod is busy")
+
+    with pytest.raises(BridgeError):
+        act_and_await_change(RaisingClient(), {"action": "choose_map_node"}, {})
+
+
 # --- generic fallback ----------------------------------------------------------------
 
 
@@ -309,6 +385,18 @@ def test_advance_one_step_map_prefers_monster_or_elite():
     ]
     advance_one_step(mod, mod.get_state())
     assert {"action": "choose_map_node", "index": 1} in mod.posted
+
+
+def test_advance_one_step_map_waits_for_the_click_before_returning():
+    mod = ScriptedMod()
+    mod.state_type = "map"
+    mod.next_map_options = [{"index": 0, "type": "Monster"}]
+    mod.after_map_choice = "monster"
+
+    result = advance_one_step(mod, mod.get_state())
+
+    assert mod.posted == [{"action": "choose_map_node", "index": 0}]
+    assert result["state_type"] == "monster"
 
 
 def test_advance_one_step_rewards_claims_a_takeable_item():

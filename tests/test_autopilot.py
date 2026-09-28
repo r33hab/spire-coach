@@ -127,10 +127,30 @@ def test_run_prefers_the_strategy_champions_mapped_option_over_the_fallback(tmp_
     assert {"action": "choose_map_node", "index": 1} in mod.posted
 
 
+def test_run_with_exactly_one_map_option_chooses_it_without_asking_the_strategy(tmp_path):
+    # Bug 4/7: a map with a single next_options entry never needs the strategy
+    # service at all -- one less round trip that can fail (NotReadyError, seen live
+    # on an Act 2 map) for a decision that was never really a choice.
+    mod = make_mod()
+    mod.next_map_options = [{"index": 0, "type": "Unknown"}]
+    mod.after_map_choice = "monster"
+    player = ScriptedFightPlayer(mod, [(death(), 1)])
+    engine = StubEngine()
+    runlog = RunLog(tmp_path, subdir="runs", prefix="autopilot-")
+
+    autopilot.run(mod, engine, runlog, runs=1, move_player=player)
+
+    assert {"action": "choose_map_node", "index": 0} in mod.posted
+    assert engine.calls == []  # never asked
+
+
 def test_run_falls_back_when_the_engine_has_no_model(tmp_path):
     mod = make_mod()
     mod.after_map_choice = "monster"
-    mod.next_map_options = [{"index": 0, "type": "Monster"}]
+    # Two options (bug 4/7 made a single-option map skip the strategy call entirely,
+    # which would make this test pass for the wrong reason): the fallback's own "first
+    # Monster/Elite" rule must still pick index 0 here once the engine has no model.
+    mod.next_map_options = [{"index": 0, "type": "Monster"}, {"index": 1, "type": "Shop"}]
     player = ScriptedFightPlayer(mod, [(death(), 1)])
     engine = StubEngine(answers=[EngineError("no_model", error_type="no_model")])
     runlog = RunLog(tmp_path, subdir="runs", prefix="autopilot-")
