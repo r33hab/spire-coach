@@ -40,6 +40,16 @@ from coach.snapshot import SnapshotError, build_live_snapshot
 DEFAULT_SETTLE_TIMEOUT_S = 20.0
 DEFAULT_POLL_S = 0.3
 DEFAULT_MAX_MOVES = 300  # a stuck-safety cap, not a real turn limit ("a timeout, then recovery")
+# No hopeless repeats (spec): a generous no-progress cap on consecutive turns without a
+# new low in total alive-enemy hp, checked once per round. Calibrated against a real,
+# eventually-won fight-lab capture (Decimillipede, fightlab-20260928-213922.jsonl,
+# session buffer at 5000 hp): its total enemy hp went 4 full rounds at its longest
+# without beating its own running low (segments reattaching), across 34 rounds overall
+# -- slow, not stalled. 15 gives that more than 3x headroom while stopping well short
+# of DEFAULT_MAX_MOVES on an actual wall (The Insatiable kills in 5 turns unless
+# specific cards are played; Aeonglass/Entomancer flood the hand instead of dealing
+# damage) rather than burning the full 300-move cap every single attempt.
+DEFAULT_NO_PROGRESS_ROUNDS = 15
 
 
 def in_combat(state: dict) -> bool:
@@ -67,6 +77,40 @@ def move_to_action(move: Move) -> dict | None:
     if move.target:
         action["target"] = move.target
     return action
+
+
+def _forced_selection_move(live: dict) -> Move | None:
+    """A deterministic stand-in for a mandatory in-combat selection the engine has no
+    model for.
+
+    Confirmed live (Knowledge Demon's forced curse pick, fightlab-20260928-213922):
+    when `pending_selection`'s source is a power or unknown -- not a card, potion or
+    relic -- the engine's own `analyze` has nothing to search and its `best` degrades
+    to a no-op such as `end_turn`, which the mod ignores on a card_select/hand_select
+    screen; sending it left the screen up forever (300 identical moves, the safety cap
+    the only way out). This forces the first offered candidate instead, so the screen
+    always resolves -- the same "first option" doctrine as the non-combat generic
+    fallback (`coach.navigator.advance_one_step`), not good play, just termination.
+    None when there is nothing to force a choice from (no `pending_selection`, or no
+    candidates), so the caller falls back to the engine's own (still useless) move
+    rather than crash."""
+    selection = live.get("pending_selection")
+    if not isinstance(selection, dict):
+        return None
+    candidates = selection.get("candidates") or []
+    if not candidates:
+        return None
+    return Move(
+        kind="select",
+        card_index=None,
+        card_uid=None,
+        card_id=candidates[0].get("id"),
+        potion_slot=None,
+        potion_id=None,
+        target=None,
+        select_index=0,
+        label="forced: first candidate (engine has no model for this selection's source)",
+    )
 
 
 def wait_settled(
@@ -118,6 +162,7 @@ class MovePlayer:
         settle_timeout_s: float = DEFAULT_SETTLE_TIMEOUT_S,
         poll_s: float = DEFAULT_POLL_S,
         source: str = "fightlab",
+        no_progress_rounds: int = DEFAULT_NO_PROGRESS_ROUNDS,
     ) -> None:
         self._client = client
         self._engine = engine
@@ -127,14 +172,22 @@ class MovePlayer:
         self._settle_timeout_s = settle_timeout_s
         self._poll_s = poll_s
         self._source = source
+        self._no_progress_rounds = no_progress_rounds
         self._last_room_type: str | None = None
         self.stats = PlayStats()
 
     def play_fight(self, state: dict, *, max_moves: int = DEFAULT_MAX_MOVES) -> FightOutcome:
         """Play settled combat decisions from `state` until the fight ends (the mod's
-        `state_type` leaves the combat set) or `max_moves` is hit."""
+        `state_type` leaves the combat set), `max_moves` is hit, or no-progress gives up
+        first (`_no_progress_rounds` full rounds without a new low in total alive-enemy
+        hp -- a wall like The Insatiable or Aeonglass/Entomancer, not a slow win like
+        the Decimillipede, whose segments can reattach for a few rounds at a time but
+        which this is calibrated to outlast; see DEFAULT_NO_PROGRESS_ROUNDS)."""
         pending: tuple[dict, Move, str] | None = None
         last_hp = _hp_of(state)
+        best_enemy_hp: int | None = None
+        stalled_rounds = 0
+        last_round_checked: int | None = None
         for _ in range(max_moves):
             if (hp := _hp_of(state)) is not None:
                 last_hp = hp
@@ -153,6 +206,29 @@ class MovePlayer:
             decision = classify(state)
             key = fingerprint(state)
             self._log_state(state, decision, key)
+            if decision.kind is DecisionKind.COMBAT:
+                round_ = (state.get("battle") or {}).get("round")
+                if isinstance(round_, int) and round_ != last_round_checked:
+                    last_round_checked = round_
+                    hp = _total_enemy_hp(state)
+                    if best_enemy_hp is None or hp < best_enemy_hp:
+                        best_enemy_hp, stalled_rounds = hp, 0
+                    else:
+                        stalled_rounds += 1
+                    if stalled_rounds > self._no_progress_rounds:
+                        self._runlog.append(
+                            "error",
+                            {
+                                "error": (
+                                    f"fightlab: no progress -- total enemy hp has not "
+                                    f"reached a new low ({best_enemy_hp}) in "
+                                    f"{stalled_rounds} turns"
+                                )
+                            },
+                        )
+                        if pending is not None:
+                            self._resolve_check(pending, None, None, comparable=False)
+                        return FightOutcome(state=state, ok=False, last_hp=last_hp)
             if pending is not None:
                 self._resolve_check(pending, state, key, comparable=True)
                 pending = None
@@ -214,6 +290,8 @@ class MovePlayer:
             },
         )
         move = analysis.best
+        if decision.kind is DecisionKind.COMBAT_SELECT and move.kind != "select":
+            move = _forced_selection_move(live) or move
         action = move_to_action(move)
         if action is None:
             self._runlog.append(
@@ -295,3 +373,17 @@ class MovePlayer:
 def _hp_of(state: dict) -> int | None:
     hp = (state.get("player") or {}).get("hp")
     return hp if isinstance(hp, int) and not isinstance(hp, bool) else None
+
+
+def _total_enemy_hp(state: dict) -> int:
+    """Sum of every alive enemy's hp, for the no-progress check. 0 counts as real
+    progress (every enemy dead), not a missing reading -- only skipped/malformed
+    entries are left out."""
+    total = 0
+    for enemy in (state.get("battle") or {}).get("enemies") or []:
+        if not isinstance(enemy, dict) or not enemy.get("alive"):
+            continue
+        hp = enemy.get("hp")
+        if isinstance(hp, int) and not isinstance(hp, bool):
+            total += hp
+    return total
