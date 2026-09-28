@@ -79,24 +79,21 @@ def move_to_action(move: Move) -> dict | None:
     return action
 
 
-def _forced_selection_move(live: dict) -> Move | None:
+def _forced_selection_move(selection: dict) -> Move | None:
     """A deterministic stand-in for a mandatory in-combat selection the engine has no
     model for.
 
     Confirmed live (Knowledge Demon's forced curse pick, fightlab-20260928-213922):
     when `pending_selection`'s source is a power or unknown -- not a card, potion or
     relic -- the engine's own `analyze` has nothing to search and its `best` degrades
-    to a no-op such as `end_turn`, which the mod ignores on a card_select/hand_select
-    screen; sending it left the screen up forever (300 identical moves, the safety cap
-    the only way out). This forces the first offered candidate instead, so the screen
-    always resolves -- the same "first option" doctrine as the non-combat generic
-    fallback (`coach.navigator.advance_one_step`), not good play, just termination.
-    None when there is nothing to force a choice from (no `pending_selection`, or no
-    candidates), so the caller falls back to the engine's own (still useless) move
-    rather than crash."""
-    selection = live.get("pending_selection")
-    if not isinstance(selection, dict):
-        return None
+    to a no-op such as `end_turn`. This forces the first offered candidate instead, so
+    the screen always resolves -- the same "first option" doctrine as the non-combat
+    generic fallback (`coach.navigator.advance_one_step`), not good play, just
+    termination. Only used when stopping (confirming or skipping) is not itself a
+    legal move (see `_selection_step`); this is the last resort, not a shortcut around
+    the min/max/can_skip rules that govern that.
+    None when there is nothing to force a choice from (no candidates), so the caller
+    falls back to the engine's own (still useless) move rather than crash."""
     candidates = selection.get("candidates") or []
     if not candidates:
         return None
@@ -111,6 +108,85 @@ def _forced_selection_move(live: dict) -> Move | None:
         select_index=0,
         label="forced: first candidate (engine has no model for this selection's source)",
     )
+
+
+def _select_action(kind: str, index: int) -> dict:
+    """The mod action that presses candidate `index` on a pending in-combat
+    selection. `kind` is `pending_selection.kind` (schema section 1.1): HAND is a pick
+    from the player's own hand (Armaments' upgrade, Burning Pact's discard --
+    `NPlayerHand.IsInCardSelection`, STS2MCP `ExecuteCombatSelectCard`); GRID and
+    CHOOSE are both a different screen entirely (a card grid overlay -- Headbutt's
+    discard-pile fetch -- or a "choose one of these" overlay a potion or card can open
+    -- STS2MCP `NCardGridSelectionScreen`/`NChooseACardSelectionScreen`, both driven by
+    `ExecuteSelectCard`, which `ExecuteCombatSelectCard` has no path to at all: it only
+    ever looks at the hand). Sending `combat_select_card` for a GRID/CHOOSE screen is
+    the bug that broke the very first fight tonight (autopilot-20260929-002615.jsonl:
+    a Colorless Potion's CHOOSE screen looped 42 times, `selected` always `[]`, since
+    the hand-only action never touched the overlay actually open)."""
+    if kind == "HAND":
+        return {"action": "combat_select_card", "card_index": index}
+    return {"action": "select_card", "index": index}
+
+
+def _confirm_action(kind: str) -> dict | None:
+    """Finish a selection that has enough picks to stop on (`_selection_step` only
+    calls this once that is true). HAND and GRID both need an explicit confirm
+    (`combat_confirm_selection`/`confirm_selection`); CHOOSE does not and has none --
+    a single `select_card` press already resolves it (STS2MCP `ExecuteConfirmSelection`
+    explicitly errors "Choose-a-card screen requires no confirmation" for it), so this
+    returns None and the caller sends nothing further."""
+    if kind == "HAND":
+        return {"action": "combat_confirm_selection"}
+    if kind == "CHOOSE":
+        return None
+    return {"action": "confirm_selection"}
+
+
+def _skip_action(kind: str) -> dict:
+    """Decline a skippable selection with nothing picked yet. HAND has no separate
+    skip control -- confirming with zero selected (only ever attempted when `min` is 0)
+    is how a hand pick is declined. GRID and CHOOSE both skip through
+    `cancel_selection` (STS2MCP `ExecuteCancelSelection`: the choose screen's own Skip
+    button, or the grid's Close, whichever is open)."""
+    if kind == "HAND":
+        return {"action": "combat_confirm_selection"}
+    return {"action": "cancel_selection"}
+
+
+def _selection_step(selection: dict, move: Move) -> tuple[Move, dict | None]:
+    """What to do about one pending in-combat selection (schema section 1.1), given
+    the engine's proposed `move` for this decision. Never sends more than one action:
+    the caller re-decides from scratch once the next position settles, so a multi-pick
+    screen is a sequence of ordinary decisions, one pick per round trip, exactly like
+    the engine's own `MoveStat.select_indices` models it -- not a loop this function
+    runs itself.
+
+    Rules (spec, bug 1&7/7): never pick past `max`; never confirm below `min`; skip
+    (nothing picked) only when `can_skip` allows it; otherwise keep picking, forcing
+    the first candidate only when the engine's own move cannot be trusted at all
+    (no legal way to stop yet, and it did not offer a pick)."""
+    kind = str(selection.get("kind") or "HAND")
+    min_ = selection.get("min")
+    min_ = min_ if isinstance(min_, int) else 0
+    max_ = selection.get("max")
+    max_ = max_ if isinstance(max_, int) else None
+    selected_count = len(selection.get("selected_uids") or [])
+    can_skip = bool(selection.get("can_skip"))
+    at_max = max_ is not None and selected_count >= max_
+    met_min = selected_count >= min_
+
+    if at_max:
+        return move, _confirm_action(kind)
+    if move.kind == "select":
+        return move, _select_action(kind, move.select_index)
+    if can_skip and selected_count == 0:
+        return move, _skip_action(kind)
+    if met_min:
+        return move, _confirm_action(kind)
+    forced = _forced_selection_move(selection)
+    if forced is not None:
+        return forced, _select_action(kind, forced.select_index)
+    return move, None
 
 
 def wait_settled(
@@ -290,9 +366,11 @@ class MovePlayer:
             },
         )
         move = analysis.best
-        if decision.kind is DecisionKind.COMBAT_SELECT and move.kind != "select":
-            move = _forced_selection_move(live) or move
-        action = move_to_action(move)
+        if decision.kind is DecisionKind.COMBAT_SELECT:
+            selection = live.get("pending_selection") or {}
+            move, action = _selection_step(selection, move)
+        else:
+            action = move_to_action(move)
         if action is None:
             self._runlog.append(
                 "action", {"error": f"no mod action for move kind {move.kind!r}"}
@@ -300,8 +378,6 @@ class MovePlayer:
             return None
         try:
             self._client.post_action(action)
-            if action["action"] == "combat_select_card":
-                self._client.post_action({"action": "combat_confirm_selection"})
         except BridgeError as exc:
             self._runlog.append(
                 "action", {"move": dataclasses.asdict(move), "error": str(exc)}
