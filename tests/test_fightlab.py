@@ -67,7 +67,7 @@ def make_mod() -> ScriptedMod:
     return mod
 
 
-def run_lab(mod, player, tmp_path, *, fights=1, acts=(2, 3, 1)):
+def run_lab(mod, player, tmp_path, *, fights=1, acts=(2, 3, 1), buffer_hp=0):
     runlog = RunLog(tmp_path, subdir="runs", prefix="fightlab-")
     summary = fightlab.run(
         mod,
@@ -75,6 +75,7 @@ def run_lab(mod, player, tmp_path, *, fights=1, acts=(2, 3, 1)):
         runlog,
         fights=fights,
         acts=acts,
+        buffer_hp=buffer_hp,
         move_player=player,
         shards_root=tmp_path / "no-shards",
     )
@@ -118,6 +119,30 @@ def test_run_advances_to_the_right_act_before_the_encounter(tmp_path, monkeypatc
     assert sum(1 for a in mod.posted if a.get("action") == "debug_enter_next_act") == 1
     encounter_calls = [a for a in mod.posted if a.get("action") == "debug_start_encounter"]
     assert encounter_calls == [{"action": "debug_start_encounter", "encounter": "KaiserCrabBoss"}]
+
+
+def test_buffer_hp_applies_to_a_boss_fight_only(tmp_path, monkeypatch):
+    mod = make_mod()
+    player = StubPlayer([_Scripted(won())])
+    forced = [Encounter("KaiserCrabBoss", 2, "Hive", "boss")]
+    monkeypatch.setattr(fightlab, "rank_encounters", lambda *a, **k: forced)
+
+    _, runlog = run_lab(mod, player, tmp_path, fights=1, buffer_hp=500)
+
+    assert {"action": "debug_gain_max_hp", "amount": 500} in mod.posted
+    lines = [json.loads(line) for line in runlog.path.read_text(encoding="utf-8").splitlines()]
+    assert any(line["kind"] == "buffer" and line["payload"]["amount"] == 500 for line in lines)
+
+
+def test_buffer_hp_does_not_apply_to_a_plain_monster(tmp_path, monkeypatch):
+    mod = make_mod()
+    player = StubPlayer([_Scripted(won())])
+    forced = [Encounter("BowlbugsWeak", 2, "Hive", "monster")]
+    monkeypatch.setattr(fightlab, "rank_encounters", lambda *a, **k: forced)
+
+    run_lab(mod, player, tmp_path, fights=1, buffer_hp=500)
+
+    assert not any(a.get("action") == "debug_gain_max_hp" for a in mod.posted)
 
 
 def test_run_recovers_from_a_bridge_error_and_counts_a_failure(tmp_path):

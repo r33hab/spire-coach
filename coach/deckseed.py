@@ -31,6 +31,7 @@ from __future__ import annotations
 import gzip
 import json
 import random
+import sys
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,6 +39,10 @@ from pathlib import Path
 from coach.bridge.client import BridgeError, ModClient
 
 DEFAULT_SHARDS_ROOT = Path.home() / "Documents" / "git" / "sts2-wt" / "training" / "runs" / "full"
+# sts2's own package (sts2_gym) is not installed in the coach's env, the same reason
+# coach.engine puts it on the engine service subprocess's PYTHONPATH; this module needs
+# it too, in-process, only for its converter table.
+DEFAULT_STS2_REPO = Path.home() / "Documents" / "git" / "sts2"
 # The Ironclad's starting deck (STRIKE_IRONCLAD x5, DEFEND_IRONCLAD x4, BASH, and the
 # curse a run can start with): already dealt by a fresh encounter, so sampled copies of
 # these are not worth re-adding.
@@ -86,6 +91,7 @@ def sample_deck(
     rng: random.Random | None = None,
     max_shards_tried: int = 40,
     card_entries: dict[int, str] | None = None,
+    sts2_repo: Path = DEFAULT_STS2_REPO,
 ) -> list[SampledCard] | None:
     """A realistic run deck for `act` (1-3, the coach's own numbering), or None when no
     shard has a fight start recorded for it. Only the cards beyond the character's
@@ -95,7 +101,7 @@ def sample_deck(
     if not shards:
         return None
     rng.shuffle(shards)
-    table = card_entries if card_entries is not None else _card_entries()
+    table = card_entries if card_entries is not None else _card_entries(sts2_repo)
     for shard in shards[:max_shards_tried]:
         starts = list(iter_fight_starts(shard, act_index=act - 1))
         if not starts:
@@ -115,9 +121,15 @@ def sample_deck(
     return None
 
 
-def _card_entries() -> dict[int, str]:
-    """sts2's numeric card id -> the game's entry id. Imported lazily so a caller that
-    never samples a deck does not need the sts2 checkout importable."""
+def _card_entries(sts2_repo: Path) -> dict[int, str]:
+    """sts2's numeric card id -> the game's entry id. `sts2_gym` is not installed in
+    the coach's own env (coach.engine puts it on the engine service subprocess's
+    PYTHONPATH instead), so this puts `sts2_repo/src` on `sys.path` itself, the same
+    way `coach.fidelity_scoreboard.load_fidelity_replay` does. Imported lazily so a
+    caller that never samples a deck does not need the sts2 checkout at all."""
+    src = str(sts2_repo / "src")
+    if src not in sys.path:
+        sys.path.insert(0, src)
     from sts2_gym.live import ids  # noqa: PLC0415
 
     return ids.card_entries()

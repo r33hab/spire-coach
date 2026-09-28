@@ -64,6 +64,33 @@ def test_fight_picker_cycles_through_the_ranked_list():
     assert picked == [a, b, a, b, a]
 
 
+def test_fight_picker_reprioritizes_from_moves_recorded_this_session():
+    a = Encounter("A", 2, "Hive", BOSS)
+    b = Encounter("B", 2, "Hive", BOSS)
+    c = Encounter("C", 2, "Hive", BOSS)
+    picker = FightPicker([a, b, c])
+    assert picker.next() is a  # the static rank's own first pick
+    picker.record(a, moves=5)  # a died fast: still the fewest UNLESS something untried exists
+    assert picker.next() is b  # b (0 moves) beats a (5), and is not the one just played
+    picker.record(b, moves=50)  # b lasted a long fight
+    assert picker.next() is c  # c (0 moves) is still untried, ahead of both a and b
+    picker.record(c, moves=1)
+    # every encounter has now been tried at least once; the lowest total (a, 5) wins,
+    # and it is not "c" (the one just played), so no back-to-back repeat either.
+    assert picker.next() is a
+
+
+def test_fight_picker_never_repeats_the_previous_encounter_when_another_exists():
+    a = Encounter("A", 2, "Hive", BOSS)
+    b = Encounter("B", 2, "Hive", BOSS)
+    picker = FightPicker([a, b])
+    picker.record(a, moves=0)
+    picker.record(b, moves=0)  # tied at 0 moves each: rank order alone would repeat "a"
+    first = picker.next()
+    second = picker.next()
+    assert first is not second
+
+
 def test_fight_picker_refuses_an_empty_list():
     import pytest
 

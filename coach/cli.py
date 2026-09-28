@@ -64,8 +64,17 @@ DEFAULT_LAB_ACTS = (2, 3, 1)  # Act 2-3 first, then the rest
 DEFAULT_LAB_ASCENSION = 10
 DEFAULT_LAB_FIGHTS = 20
 DEFAULT_LAB_TIME_SCALE = 3.0  # the fight lab's default (spec: "raise the game's time scale")
+# HP only (never attack/Strength: that would shorten a fight and hide its later moves).
+# Confirmed live that some bosses need more than a token buffer to show their full
+# move set (fast per-turn scaling, and A10's second boss); 500 is a starting point, not
+# a measured number -- raise it with --buffer-hp if a fight still ends early.
+DEFAULT_LAB_BUFFER_HP = 500
 DEFAULT_AUTOPILOT_RUNS = 1
 DEFAULT_AUTOPILOT_BUFFER_HP = 0  # off by default (spec)
+# The default 2.0s (coach.bridge.client.DEFAULT_TIMEOUT_S) is tuned for a human's pace;
+# confirmed live that a menu transition, a room entry or a busy main thread under
+# time_scale can take longer than that during unattended, back-to-back play.
+LAB_CLIENT_TIMEOUT_S = 10.0
 
 _SERVER_START_S = 10.0  # uvicorn listens well within this
 _SERVER_STOP_S = 5.0
@@ -401,6 +410,7 @@ def cmd_fight_lab(
     time_scale: float = DEFAULT_LAB_TIME_SCALE,
     acts: list[int] | None = None,
     ascension: int = DEFAULT_LAB_ASCENSION,
+    buffer_hp: int = DEFAULT_LAB_BUFFER_HP,
     workers: int = DEFAULT_WORKERS,
     budget_s: float = DEFAULT_BUDGET_S,
     client_factory: Callable[[str, str | None], ModClient] | None = None,
@@ -410,7 +420,9 @@ def cmd_fight_lab(
     coach.fightlab). Stops at the first unmet precondition, printing exactly what to
     fix, same as `doctor`."""
     acts = list(DEFAULT_LAB_ACTS) if acts is None else acts
-    client = (client_factory or ModClient)(config.base_url, config.token)
+    client = (
+        client_factory or (lambda url, token: ModClient(url, token, timeout_s=LAB_CLIENT_TIMEOUT_S))
+    )(config.base_url, config.token)
     try:
         problems = navigator.check_preconditions(client, config)
         if problems:
@@ -434,6 +446,7 @@ def cmd_fight_lab(
                 fights=fights,
                 acts=acts,
                 ascension=ascension,
+                buffer_hp=buffer_hp,
                 time_budget_s=budget_s,
                 game_version=read_game_version() or "unknown",
                 fidelity_doc=_read_fidelity_doc(config.data_dir),
@@ -463,7 +476,9 @@ def cmd_autopilot(
     """Play `runs` whole real runs unattended, Ironclad at `ascension`, using the fight
     lab's own move player and recording between real fights too (see coach.autopilot).
     """
-    client = (client_factory or ModClient)(config.base_url, config.token)
+    client = (
+        client_factory or (lambda url, token: ModClient(url, token, timeout_s=LAB_CLIENT_TIMEOUT_S))
+    )(config.base_url, config.token)
     try:
         problems = navigator.check_preconditions(client, config)
         if problems:
@@ -977,6 +992,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="ascension level for every fight (default: %(default)s)",
     )
     lab_parser.add_argument(
+        "--buffer-hp",
+        type=int,
+        default=DEFAULT_LAB_BUFFER_HP,
+        help="extra current+max HP for elite/boss fights only, 0 = off, HP-only, "
+        "so a fight lasts long enough to show its full move set (default: %(default)s)",
+    )
+    lab_parser.add_argument(
         "--workers",
         type=_worker_count,
         default=DEFAULT_WORKERS,
@@ -1095,6 +1117,7 @@ def main(argv: list[str] | None = None) -> int:
                 time_scale=args.time_scale,
                 acts=args.acts,
                 ascension=args.ascension,
+                buffer_hp=args.buffer_hp,
                 workers=args.workers,
                 budget_s=args.budget,
             )

@@ -4,6 +4,7 @@ non-combat fallback, against the in-process ScriptedMod fake."""
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 from fakes.fake_mod import ScriptedMod
@@ -19,6 +20,13 @@ from coach.navigator import (
     hp_of,
     leave_run,
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_real_sleep(monkeypatch):
+    # enter_act waits out RunManager's own async act generation between steps; nothing
+    # here should ever need that to be a real wait against ScriptedMod.
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
 
 
 def make_config(tmp_path, *, allow_debug_actions: bool | None = True) -> Config:

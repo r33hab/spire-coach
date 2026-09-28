@@ -160,23 +160,42 @@ def rank_encounters(
 
 
 class FightPicker:
-    """Which encounter to fight next: `rank_encounters`' order, repeated. A fight-lab
-    session plays many more fights than there are encounters, so this cycles the
-    ranked list rather than hammering rank 1 forever -- a long session still visits
-    every encounter roughly evenly, while a short one still spends its fights on the
-    encounters that need them most.
+    """Which encounter to fight next: the one with the fewest moves recorded *this
+    session* among `rank_encounters`' candidates, never the one just played when
+    another is available. `rank_encounters`' own order (from `data/fidelity/latest.json`,
+    a snapshot from whenever the scoreboard last ran) only picks the very first fight
+    and breaks ties after that; every fight after it is chosen from what actually
+    happened in this run, not from a doc read once at the start. This is what stops a
+    fast, repeatable death from being replayed over and over: a boss that kills the
+    player in ten moves stops looking cheap the moment it has been fought once, since
+    every still-untried encounter reads as a bigger gap than ten moves.
     """
 
     def __init__(self, ranked: Sequence[Encounter]) -> None:
         if not ranked:
             raise ValueError("no encounters to choose from (check --acts)")
         self._ranked = list(ranked)
-        self._next = 0
+        self._rank_index = {encounter.name: i for i, encounter in enumerate(self._ranked)}
+        self._moves_this_session: dict[str, int] = dict.fromkeys(self._rank_index, 0)
+        self._last: str | None = None
 
     def __len__(self) -> int:
         return len(self._ranked)
 
     def next(self) -> Encounter:
-        encounter = self._ranked[self._next % len(self._ranked)]
-        self._next += 1
-        return encounter
+        candidates = self._ranked
+        if self._last is not None and len(candidates) > 1:
+            others = [e for e in candidates if e.name != self._last]
+            if others:
+                candidates = others
+        chosen = min(
+            candidates, key=lambda e: (self._moves_this_session[e.name], self._rank_index[e.name])
+        )
+        self._last = chosen.name
+        return chosen
+
+    def record(self, encounter: Encounter, moves: int) -> None:
+        """Add `moves` (however many were actually recorded, win, death or setup
+        failure) to `encounter`'s running total for this session."""
+        if encounter.name in self._moves_this_session:
+            self._moves_this_session[encounter.name] += moves
