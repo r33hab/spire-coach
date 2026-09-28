@@ -326,7 +326,8 @@ def _select_first_card(client: ModClient, state: dict) -> None:
     offered card, then confirm.
 
     Confirmed live (real captures under data/runs/, screen_type "upgrade"/"select"/
-    "simple_select"/"grid"): this state_type is a different screen from `card_reward`
+    "simple_select", always `selection.kind: "GRID"`): this state_type is a different
+    screen from `card_reward`
     (STS2MCP's `NCardGridSelectionScreen`/`select_card`+`confirm_selection`, not
     `NCardRewardSelectionScreen`/`skip_card_reward`) -- sending `skip_card_reward` here
     has no handler on this screen and left it up forever. `select_card`'s own
