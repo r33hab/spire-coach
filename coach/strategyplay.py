@@ -12,12 +12,19 @@ answer at all. Documented limit: between-fight play outside these kinds is that
 generic fallback, not actually the champion's pick, until this table is widened
 against a live run.
 
-Never maps a card reward or a shop purchase (`card.take` and every `shop.buy_*`):
-workshop content mods (Watcher, The Shape, Multiplayer Expanded) grow Ironclad's card
-pool past what the simulator, the converter and the strategy champion were trained on,
-so an offered card or shop item may be one none of them can score. The generic
-fallback's own card-reward and shop handling never takes or buys anything either, so a
-modded card is never picked regardless of which policy is driving.
+`card.take` maps to `select_card_reward` (2026-09-28: the user disabled the workshop
+content mods -- Watcher, The Shape, Multiplayer Expanded -- in `settings.save`, the
+ones that grow Ironclad's card pool past what the simulator, the converter and the
+strategy champion were trained on). A card the training package's own name table still
+cannot place arrives as an `unknown`-kind option upstream (`rl/run_train/features.py`'s
+`_card_option`, on `UnknownIdError`) and is unscorable, so it sorts last and is never
+`options[0]` unless every offered card is unrecognized -- this module never needs its
+own extra guard for that case.
+
+Still never maps a shop purchase (every `shop.buy_*`) or a shop removal (`shop.remove`):
+unlike a card reward, a shop's offered cards and their prices are not yet checked live
+end to end, so this module leaves the whole shop screen (besides `shop.leave`) to the
+generic fallback, which never buys anything, until that path is verified.
 """
 
 from __future__ import annotations
@@ -58,13 +65,8 @@ def _execute(client: ModClient, state: dict, kind: str, option: dict) -> bool:
         return _post(client, {"action": "skip_card_reward"})
     if kind == "card.reroll":
         return _post(client, {"action": "select_card_reward_alternative", "index": 0})
-    # "card.take" is deliberately NOT mapped: workshop content mods (Watcher, The Shape,
-    # Multiplayer Expanded) grow Ironclad's card pool past what the simulator, the
-    # converter and the strategy champion know, so an offered card reward may be one
-    # none of them can score. Falling back to the generic policy's unconditional
-    # skip_card_reward is what keeps a modded card from ever being taken; the same
-    # reasoning is why no shop.buy_* kind is mapped here either (the generic policy
-    # only ever leaves a shop, never buys).
+    if kind == "card.take":
+        return _take_card_reward(client, option)
     if kind in ("reward.potion", "reward.relic"):
         return _claim_reward(client, state, kind)
     if kind in ("reward.proceed", "shop.leave", "rest.leave"):
@@ -102,6 +104,18 @@ def _node_type_name(node: object) -> str | None:
         except (TypeError, ValueError):
             return None
     return None
+
+
+def _take_card_reward(client: ModClient, option: dict) -> bool:
+    """`card.take`: `option["action"]` is already the offered card's on-screen index
+    (`rl/run_train/features.py`'s `_card_option` sets it from the mod's own
+    `card_reward.cards[i].index`), so unlike `map.node` this needs no lookup against
+    `state` to place it -- `select_card_reward`'s `card_index` takes that same index
+    directly (STS2MCP `ExecuteSelectCardReward`)."""
+    index = option.get("action")
+    if not isinstance(index, int) or isinstance(index, bool):
+        return False
+    return _post(client, {"action": "select_card_reward", "card_index": index})
 
 
 def _claim_reward(client: ModClient, state: dict, kind: str) -> bool:

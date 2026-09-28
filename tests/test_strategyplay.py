@@ -89,13 +89,18 @@ def test_reward_relic_with_no_relic_offered_falls_back():
     assert execute_best_option(client, state, result_for("reward.relic")) is False
 
 
-def test_card_take_is_never_mapped_so_a_modded_card_is_never_taken():
-    # card.take falls back to the generic policy on purpose: a card reward can be a
-    # workshop mod's card (Watcher/The Shape/Multiplayer Expanded grow the pool to 101
-    # cards), which the strategy champion cannot have scored.
+def test_card_take_selects_the_offered_card_by_its_screen_index():
+    # option["action"] is the training design's own address for the option (DESIGN.md
+    # 3.4 / rl/run_train/features.py's Option), which for card.take is already the
+    # card_reward screen's own card index -- the same one select_card_reward wants.
     client = FakeClient()
-    state = {"rewards": {"items": [{"index": 2, "type": "relic"}]}}
-    assert execute_best_option(client, state, result_for("card.take")) is False
+    assert execute_best_option(client, {}, result_for("card.take", action=1)) is True
+    assert client.posted == [{"action": "select_card_reward", "card_index": 1}]
+
+
+def test_card_take_with_no_action_index_falls_back():
+    client = FakeClient()
+    assert execute_best_option(client, {}, result_for("card.take")) is False
     assert client.posted == []
 
 
@@ -118,8 +123,13 @@ def test_bridge_error_falls_back_instead_of_raising():
 
 
 def test_no_shop_purchase_kind_is_ever_mapped():
-    # A shop can sell a workshop mod's card too; only leaving the shop is mapped.
+    # The training design's real kind names (rl/run_train/features.py OPTION_KINDS) are
+    # "shop.card"/"shop.relic"/"shop.potion"/"shop.remove" -- not "shop.buy_*", which
+    # never appears; this test used to assert against kinds the engine never sends.
+    # Shop buys and card removal are not yet checked live end to end (task item 4), so
+    # only shop.leave is mapped; the rest still falls back to the generic policy, which
+    # never buys or removes anything either.
     client = FakeClient()
-    for kind in ("shop.buy_card", "shop.buy_relic", "shop.buy_potion", "shop.remove"):
+    for kind in ("shop.card", "shop.relic", "shop.potion", "shop.remove"):
         assert execute_best_option(client, {}, result_for(kind, deck_index=0)) is False
     assert client.posted == []
