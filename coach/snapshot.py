@@ -104,6 +104,7 @@ _POWER_FIELD_KEYS: dict[str, tuple[str, ...]] = {
     "POSSESS_SPEED_POWER": ("stolen",),
     "POSSESS_STRENGTH_POWER": ("stolen",),
     "SWIPE_POWER": ("stolen_card", "stolen_card_upgraded"),
+    "THIEVERY_POWER": ("stolen_gold",),
 }
 # SwipePower's hover tip is the card it stole (decompiled SwipePower
 # `ExtraHoverTips`), which the mod reports as a keyword id "CARD.<ENTRY>", with

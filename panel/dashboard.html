@@ -157,6 +157,12 @@
         <thead><tr><th>Act</th><th>Replayed</th><th>Comparable</th><th>Matched</th><th>Mismatched</th><th>Not comp.</th><th>Comparable %</th><th>Match %</th></tr></thead>
         <tbody id="fidelity-table"></tbody>
       </table></div>
+      <h2 style="margin-top:14px">Run layer · seed-exact replay</h2>
+      <div class="explain" id="fidelity-runs-meta"></div>
+      <div class="scroll"><table>
+        <thead><tr><th>Category</th><th>Compared</th><th>Matched</th><th>Match %</th><th>First divergence</th></tr></thead>
+        <tbody id="fidelity-runs-table"></tbody>
+      </table></div>
     </section>
 
     <section class="card span-4">
@@ -423,12 +429,37 @@ function fidelityChart(el, trend, acts) {
   el.innerHTML = s + "</svg>";
 }
 
+// The run layer (roadmap A3): every offering of every real run replayed seed-exactly --
+// rewards, shops, events, maps, encounters -- per category. A session played with content
+// mods is not counted: its pools, and every roll drawn over them, are not the game's.
+function renderRunFidelity(runs) {
+  if (!runs || !runs.totals) {
+    $("fidelity-runs-meta").textContent = "No run-layer replay in this scoreboard run.";
+    $("fidelity-runs-table").innerHTML = "";
+    return;
+  }
+  const all = runs.runs || [];
+  const counted = all.filter((r) => !(r.modded && r.modded.length));
+  const modded = all.length - counted.length;
+  $("fidelity-runs-meta").textContent = `${counted.length} unmodded run(s)` +
+    (modded ? ` · ${modded} modded run(s) not counted` : "") +
+    ((runs.unmatched || []).length ? ` · ${runs.unmatched.length} session(s) with no finished run yet` : "");
+  const rows = (runs.categories || []).filter((c) => (runs.totals[c] || {}).compared);
+  $("fidelity-runs-table").innerHTML = rows.map((c) => {
+    const t = runs.totals[c];
+    const rate = t.compared ? t.matched / t.compared : null;
+    return `<tr><td>${esc(c)}</td><td>${int(t.compared)}</td><td>${int(t.matched)}</td><td>${pct(rate)}</td>` +
+      `<td class="muted">${esc(t.first_divergence || "")}</td></tr>`;
+  }).join("") || `<tr><td colspan="5" class="muted">Nothing compared yet.</td></tr>`;
+}
+
 function renderFidelity(f) {
   if (!f || !f.found) {
     $("fidelity-meta").innerHTML = `No scoreboard run yet. Run <code>spire-coach fidelity-scoreboard</code>.`;
     $("fidelity-table").innerHTML = `<tr><td colspan="8" class="muted">No scoreboard run yet.</td></tr>`;
     $("fidelity-chart").innerHTML = "";
     $("fidelity-legend").innerHTML = "";
+    renderRunFidelity(null);
     return;
   }
   const latest = f.latest, totals = latest.totals || {};
@@ -444,6 +475,7 @@ function renderFidelity(f) {
     return `<tr><td>${esc(act)}</td><td>${int(b.replayed)}</td><td>${int(b.comparable)}</td><td>${int(b.matched)}</td>` +
       `<td>${int(b.mismatched)}</td><td>${int(b.not_comparable)}</td><td>${pct(compRate)}</td><td>${pct(matchRate)}</td></tr>`;
   }).join("") || `<tr><td colspan="8" class="muted">No acts recorded.</td></tr>`;
+  renderRunFidelity(latest.runs);
   fidelityChart($("fidelity-chart"), f.trend || [], acts);
   $("fidelity-legend").innerHTML = acts.map((act, i) =>
     `<span><i style="border-color:${fidelityActColor(act, i)}"></i>${esc(act)}</span>`

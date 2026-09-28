@@ -1288,6 +1288,7 @@ _POWER_FIELD_KEYS = {
     "POSSESS_SPEED_POWER": {"stolen"},
     "POSSESS_STRENGTH_POWER": {"stolen"},
     "SWIPE_POWER": {"stolen_card", "stolen_card_upgraded"},
+    "THIEVERY_POWER": {"stolen_gold"},
 }
 
 
@@ -1342,6 +1343,23 @@ def test_power_fields_the_converter_reads_are_carried_and_nothing_else(combat_st
         {"id": "RITUAL_POWER", "amount": 3},
     ]
     assert _FORBIDDEN_SENTINEL not in json.dumps(snapshot)
+
+
+def test_thievery_carries_the_gold_it_has_taken(combat_state):
+    # ThieveryPower's Amount is the steal rate; what it has lifted is its GoldVar, which
+    # the mod sends as fields.stolen_gold (2026-09-28) and the simulator keeps as
+    # EnemyState.StolenGold.
+    state = copy.deepcopy(combat_state)
+    state["battle"]["enemies"][0]["status"].append(
+        _raw_power("THIEVERY_POWER", 20, fields={"stolen_gold": 40, "rate": 20})
+    )
+    snapshot = build_live_snapshot(state, game_version=GAME_VERSION)
+
+    assert snapshot["enemies"][0]["powers"][-1] == {
+        "id": "THIEVERY_POWER",
+        "amount": 20,
+        "fields": {"stolen_gold": 40},
+    }
 
 
 def test_a_power_without_its_fields_carries_none(combat_state):

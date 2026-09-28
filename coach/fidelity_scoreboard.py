@@ -8,7 +8,14 @@ when a check cannot be attributed -- each one belongs to (`categorize()`). This 
 does not repeat that walk: it loads whichever sts2 checkout `--sts2-repo` names,
 reruns `evaluate()` over every session under `data/runs/*.jsonl`, and tallies
 comparable/matching/mismatched checks and the top not-comparable reasons per act and
-category. It writes the result under `data/fidelity/`:
+category. The run layer is scored too (roadmap task A3): sts2's `scripts/replay_real_run.py`
+replays every session's run -- rewards, shops, events, maps, encounters, the holdings
+after each floor -- seed-exactly against the game's own screens, together with sts2's
+committed captures, and its per-category numbers go under `runs`. A session played with
+content mods is flagged and kept out of those totals. Seeds never reach the document: a
+real run's seed is the replay's input only, and its entries are named by session log.
+
+It writes the result under `data/fidelity/`:
 
 - `<timestamp>.json`, one per run of this command, stamped with the sts2 commit used;
 - `latest.json`, a copy of the newest one, for the dashboard and for people;
@@ -25,6 +32,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+import tempfile
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -66,6 +74,85 @@ def load_fidelity_replay(sts2_repo: Path) -> ModuleType:
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+class _RunReplay:
+    """sts2's `scripts/replay_real_run.py` (roadmap A3), run in the sts2 checkout's own
+    environment: it drives the native run engine through `sts2_gym.Sts2RunEnv`, whose
+    dependencies (gymnasium among them) are sts2's, not the coach's. Its `evaluate` has the
+    script's own signature and returns the script's own JSON document."""
+
+    def __init__(self, sts2_repo: Path) -> None:
+        self.sts2_repo = sts2_repo
+        self.script = sts2_repo / "scripts" / "replay_real_run.py"
+
+    def evaluate(self, session_paths: list[Path], *, fixtures: bool = True) -> dict[str, Any]:
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "runs.json"
+            command = ["uv", "run", "python", str(self.script), "--json", str(out)]
+            if fixtures:
+                command.append("--fixtures")
+            command += [str(path) for path in session_paths]
+            result = subprocess.run(
+                command, cwd=self.sts2_repo, capture_output=True, text=True, check=False
+            )
+            if result.returncode != 0 or not out.is_file():
+                raise RuntimeError(
+                    f"replay_real_run.py failed ({result.returncode}): "
+                    + (result.stderr.strip().splitlines() or ["no output"])[-1]
+                )
+            return json.loads(out.read_text(encoding="utf-8"))
+
+
+def load_run_replay(sts2_repo: Path) -> _RunReplay:
+    """The run layer's replay in `sts2_repo` (see `_RunReplay`)."""
+    replay = _RunReplay(sts2_repo)
+    if not replay.script.is_file():
+        raise FileNotFoundError(f"no scripts/replay_real_run.py under {sts2_repo}")
+    return replay
+
+
+def build_run_fidelity(
+    session_paths: list[Path], run_replay_module: Any, *, fixtures: bool = True
+) -> dict[str, Any]:
+    """The run layer's scoreboard: `replay_real_run.evaluate` over these sessions (and
+    sts2's committed captures), with every real run named by its session logs instead of
+    its seed -- the seed is the replay's input and never leaves it."""
+    doc = run_replay_module.evaluate(session_paths, fixtures=fixtures)
+    renamed: dict[str, str] = {}
+    runs = []
+    for run in doc["runs"]:
+        name = ", ".join(run["sources"]) + f" (A{run['ascension']})"
+        renamed[run["label"]] = name
+        runs.append(
+            {
+                "name": name,
+                "ascension": run["ascension"],
+                "floors": run["floors"],
+                "modded": run["modded"],
+                "stopped": run["stopped"],
+                "notes": [n for n in run["notes"] if not n.startswith("MODDED")],
+                "categories": run["categories"],
+            }
+        )
+
+    def _without_labels(totals: dict[str, Any]) -> dict[str, Any]:
+        out = {}
+        for category, stats in totals.items():
+            first = stats.get("first_divergence")
+            if first:
+                label, _, rest = first.partition(": ")
+                first = f"{renamed.get(label, label)}: {rest}"
+            out[category] = {**stats, "first_divergence": first}
+        return out
+
+    return {
+        "categories": doc["categories"],
+        "runs": runs,
+        "totals": _without_labels(doc["totals"]),
+        "modded_totals": _without_labels(doc["modded_totals"]),
+        "unmatched": doc["unmatched"],
+    }
 
 
 def _git(sts2_repo: Path, *args: str) -> str | None:
@@ -196,9 +283,16 @@ def build_scoreboard(
     resamples: int | None = None,
     now: datetime | None = None,
     replay_module: ModuleType | None = None,
+    run_replay_module: Any = None,
+    include_runs: bool = True,
+    capture_dirs: list[Path] | None = None,
 ) -> dict[str, Any]:
     """Score every session log under `runs_dir` against `sts2_repo` (or a caller-given
-    `replay_module`, for tests): the JSON document this module writes and prints."""
+    `replay_module`, for tests): the JSON document this module writes and prints.
+
+    With `include_runs` the run layer is scored as well (`build_run_fidelity`), over the
+    same sessions and the captures under `capture_dirs` (default: `runs_dir`'s sibling
+    `captures/`)."""
     replay_module = replay_module or load_fidelity_replay(sts2_repo)
     if resamples is None:
         resamples = replay_module.fidelity.DEFAULT_RESAMPLES
@@ -223,7 +317,7 @@ def build_scoreboard(
             }
         )
 
-    return {
+    doc: dict[str, Any] = {
         "generated_at": now.isoformat(),
         "resamples": resamples,
         "sts2": {
@@ -234,6 +328,24 @@ def build_scoreboard(
         "sessions": sessions_json,
         "totals": _acts_json(all_outcomes, replay_module, top_reasons=TOP_REASONS_TOTAL),
     }
+    if include_runs:
+        if capture_dirs is None:
+            capture_dirs = [runs_dir.parent / "captures"]
+        session_paths = discover_sessions(runs_dir)
+        for folder in capture_dirs:
+            session_paths += discover_sessions(folder)
+        if run_replay_module is None:
+            try:
+                run_replay_module = load_run_replay(sts2_repo)
+            except FileNotFoundError:
+                # An sts2 checkout from before the run replay: combat numbers only.
+                run_replay_module = None
+        if run_replay_module is not None:
+            try:
+                doc["runs"] = build_run_fidelity(session_paths, run_replay_module)
+            except RuntimeError as exc:
+                doc["runs"] = {"error": str(exc)}
+    return doc
 
 
 def write_scoreboard(doc: dict[str, Any], fidelity_dir: Path) -> tuple[Path, Path]:
@@ -301,6 +413,28 @@ def format_table(doc: dict[str, Any]) -> str:
         lines += _table("Totals by category:", category_rows, label_width=label_width)
         lines.append("")
 
+    runs = doc.get("runs")
+    if runs and runs.get("error"):
+        lines += [f"Run layer: {runs['error']}", ""]
+    elif runs:
+        counted = [run for run in runs["runs"] if not run["modded"]]
+        modded = len(runs["runs"]) - len(counted)
+        lines.append(
+            f"Run layer (seed-exact replay): {len(counted)} unmodded run(s)"
+            + (f", {modded} modded run(s) not counted" if modded else "")
+        )
+        width = max(len(category) for category in runs["categories"])
+        for category in runs["categories"]:
+            stats = runs["totals"][category]
+            if not stats["compared"]:
+                continue
+            first = stats["first_divergence"]
+            lines.append(
+                f"  {category:<{width}}  {stats['matched']:>5d}/{stats['compared']:<5d}"
+                + (f"  first: {first}" if first else "")
+            )
+        lines.append("")
+
     lines.append("Per session:")
     for session in doc["sessions"]:
         parts = [
@@ -347,6 +481,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="resamples per check (default: the sts2 checkout's own default)",
     )
+    parser.add_argument(
+        "--no-runs",
+        action="store_true",
+        help="skip the run layer's seed-exact replay (scripts/replay_real_run.py)",
+    )
     return parser
 
 
@@ -359,7 +498,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"No session logs found under {runs_dir}.", file=sys.stderr)
         return 1
 
-    doc = build_scoreboard(runs_dir, args.sts2_repo, resamples=args.resamples)
+    doc = build_scoreboard(
+        runs_dir, args.sts2_repo, resamples=args.resamples, include_runs=not args.no_runs
+    )
     stamped, latest = write_scoreboard(doc, out_dir)
     print(format_table(doc))
     print(f"\nWrote {stamped} and {latest}")
