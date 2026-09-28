@@ -21,10 +21,12 @@ cannot place arrives as an `unknown`-kind option upstream (`rl/run_train/feature
 `options[0]` unless every offered card is unrecognized -- this module never needs its
 own extra guard for that case.
 
-Still never maps a shop purchase (every `shop.buy_*`) or a shop removal (`shop.remove`):
-unlike a card reward, a shop's offered cards and their prices are not yet checked live
-end to end, so this module leaves the whole shop screen (besides `shop.leave`) to the
-generic fallback, which never buys anything, until that path is verified.
+Still never maps a shop purchase (`shop.card`/`shop.relic`/`shop.potion`, the training
+design's real kind names -- `rl/run_train/features.py` OPTION_KINDS; there is no
+`shop.buy_*`) or a shop removal (`shop.remove`): unlike a card reward, a shop's offered
+cards and their prices are not yet checked live end to end, so this module leaves the
+whole shop screen (besides `shop.leave`) to the generic fallback, which never buys
+anything, until that path is verified.
 """
 
 from __future__ import annotations
