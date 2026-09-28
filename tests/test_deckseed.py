@@ -10,7 +10,14 @@ import json
 import random
 
 from coach.bridge.client import BridgeError
-from coach.deckseed import SampledCard, find_shards, iter_fight_starts, sample_deck, stage_deck
+from coach.deckseed import (
+    SampledCard,
+    find_shards,
+    iter_fight_starts,
+    sample_deck,
+    stage_deck,
+    verify_staged,
+)
 
 CARD_ENTRIES = {1: "STRIKE_IRONCLAD", 2: "DEFEND_IRONCLAD", 100: "BASH", 200: "MOLTEN_FIST"}
 
@@ -91,13 +98,19 @@ class FakeClient:
 
 
 def test_stage_deck_posts_debug_add_card_for_each_card():
+    # pile "draw", not the mod's "deck" option: STS2MCP's debug_add_card documents
+    # "deck" as the run's persistent master deck (also debug_upgrade_deck's target),
+    # already shuffled into this combat's own piles by the time a fight-lab fight
+    # starts -- a card added there cannot join a fight already in progress. This was
+    # the actual cause of every real Act 2/3 fight-lab fight showing a starter-like
+    # deck (the sampled cards were real; the pile they landed in was not this fight's).
     client = FakeClient()
     cards = [SampledCard("MOLTEN_FIST", True), SampledCard("IRON_WAVE", False)]
     added = stage_deck(client, cards)
     assert added == ["MOLTEN_FIST", "IRON_WAVE"]
     assert client.posted == [
-        {"action": "debug_add_card", "card": "MOLTEN_FIST", "upgraded": True, "pile": "deck"},
-        {"action": "debug_add_card", "card": "IRON_WAVE", "upgraded": False, "pile": "deck"},
+        {"action": "debug_add_card", "card": "MOLTEN_FIST", "upgraded": True, "pile": "draw"},
+        {"action": "debug_add_card", "card": "IRON_WAVE", "upgraded": False, "pile": "draw"},
     ]
 
 
@@ -106,3 +119,47 @@ def test_stage_deck_skips_a_refused_card_but_keeps_going():
     cards = [SampledCard("GHOST_CARD", False), SampledCard("MOLTEN_FIST", False)]
     added = stage_deck(client, cards)
     assert added == ["MOLTEN_FIST"]
+
+
+def _card(card_id: str) -> dict:
+    return {"id": card_id}
+
+
+def test_verify_staged_all_found_across_piles_is_empty():
+    state = {
+        "player": {
+            "hand": [_card("MOLTEN_FIST")],
+            "draw_pile": [_card("IRON_WAVE")],
+            "discard_pile": [],
+            "exhaust_pile": [],
+        }
+    }
+    assert verify_staged(state, ["MOLTEN_FIST", "IRON_WAVE"]) == []
+
+
+def test_verify_staged_reports_a_card_found_nowhere():
+    # The exact regression this guards: debug_add_card into the wrong pile answers
+    # "ok" every time (stage_deck's "added" list looks fine) but the card never
+    # actually reaches this fight's hand/draw/discard/exhaust.
+    state = {"player": {"hand": [], "draw_pile": [], "discard_pile": [], "exhaust_pile": []}}
+    assert verify_staged(state, ["MOLTEN_FIST"]) == ["MOLTEN_FIST"]
+
+
+def test_verify_staged_matches_duplicates_one_for_one():
+    state = {"player": {"hand": [_card("STRIKE_IRONCLAD"), _card("STRIKE_IRONCLAD")]}}
+    # 3 requested, only 2 found: 1 still reported missing, not excused by the other 2.
+    assert verify_staged(state, ["STRIKE_IRONCLAD"] * 3) == ["STRIKE_IRONCLAD"]
+
+
+def test_verify_staged_checks_discard_and_exhaust_too():
+    # debug_add_card is fire-and-forget; by the time this reads state, a card can
+    # already have been drawn, played and discarded/exhausted -- still proof it landed.
+    state = {
+        "player": {
+            "hand": [],
+            "draw_pile": [],
+            "discard_pile": [_card("IRON_WAVE")],
+            "exhaust_pile": [_card("MOLTEN_FIST")],
+        }
+    }
+    assert verify_staged(state, ["IRON_WAVE", "MOLTEN_FIST"]) == []
