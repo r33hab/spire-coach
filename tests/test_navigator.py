@@ -97,6 +97,24 @@ def test_embark_run_reaches_the_map_with_the_asked_ascension():
     assert character_pick["ascension"] == 10
 
 
+def test_embark_run_retries_while_character_select_options_are_still_empty(tmp_path):
+    # Bug 6/7, confirmed live right after a game restart: character_select is reached
+    # (menu_screen alone) before its roster has populated, so a single read raises "no
+    # Ironclad option on character select: []" (autopilot-20260929-002138.jsonl).
+    # embark_run must keep polling instead of raising on the first empty read.
+    mod = ScriptedMod()
+    mod.character_select_delay_reads = 3
+    state = embark_run(mod, ascension=10)
+    assert state["state_type"] == "map"
+
+
+def test_embark_run_raises_once_character_select_options_stay_empty_past_the_timeout():
+    mod = ScriptedMod()
+    mod.character_select_delay_reads = 10**9  # never populates within the timeout
+    with pytest.raises(NavigatorError, match="Ironclad"):
+        embark_run(mod, ascension=10, timeout_s=0.2)
+
+
 def test_embark_run_raises_when_the_character_is_not_offered():
     mod = ScriptedMod()
     with pytest.raises(NavigatorError, match="Ironclad"):

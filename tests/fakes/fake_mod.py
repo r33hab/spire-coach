@@ -37,6 +37,12 @@ class ScriptedMod:
         # name -> tier ("monster"/"elite"/"boss"), consulted by debug_start_encounter;
         # an unlisted name defaults to "monster".
         self.encounter_tiers: dict[str, str] = {}
+        # Bug 6/7: right after a game restart, character_select can be reached before
+        # its roster is populated ("no Ironclad option ... []"). 0 (default) populates
+        # immediately, as every other test here assumes; a positive count holds
+        # `options` empty for that many get_state() reads first.
+        self.character_select_delay_reads = 0
+        self._character_select_reads_seen = 0
 
     # --- ModClient's interface ------------------------------------------------
 
@@ -49,6 +55,14 @@ class ScriptedMod:
         return {"current_profile_id": self.current_profile_id, "profiles": []}
 
     def get_state(self) -> dict:
+        if (
+            self.menu_screen == "character_select"
+            and not self.options
+            and self.character_select_delay_reads > 0
+        ):
+            self._character_select_reads_seen += 1
+            if self._character_select_reads_seen >= self.character_select_delay_reads:
+                self.options = ["Ironclad"]
         combat = self.state_type in ("monster", "elite", "boss")
         state: dict = {
             "state_type": self.state_type,
@@ -103,7 +117,8 @@ class ScriptedMod:
             self.menu_screen = "singleplayer"
         elif option == "standard":
             self.menu_screen = "character_select"
-            self.options = ["Ironclad"]
+            self._character_select_reads_seen = 0
+            self.options = [] if self.character_select_delay_reads > 0 else ["Ironclad"]
         elif option == "Ironclad":
             self.selected_character = "Ironclad"
             self.options = ["confirm"]

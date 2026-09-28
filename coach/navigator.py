@@ -169,13 +169,7 @@ def embark_run(
     `menu_select`'s `ascension` field sets the character-select screen's ascension
     panel before embarking (STS2MCP McpMod.Actions.cs `ApplyAscension`)."""
     _abandon_any_run_in_progress(client, timeout_s=timeout_s)
-    _select(client, "singleplayer")
-    _select(client, "standard")
-    state = poll_until(
-        client,
-        lambda s: s.get("menu_screen") == "character_select" and not s.get("selection_busy"),
-        timeout_s=timeout_s,
-    )
+    state = _reach_populated_character_select(client, timeout_s=timeout_s)
     names = _option_names(state)
     match = next((name for name in names if character.upper() in name.upper()), None)
     if match is None:
@@ -188,6 +182,42 @@ def embark_run(
     _select(client, confirm)
     state = poll_until(client, lambda s: act_of(s) is not None, timeout_s=timeout_s)
     return _reach_the_map(client, state, timeout_s=timeout_s)
+
+
+def _reach_populated_character_select(
+    client: ModClient, *, timeout_s: float, poll_s: float = _DEFAULT_POLL_S
+) -> dict:
+    """Reach the character-select screen with its roster actually populated.
+
+    Confirmed live, both right after a game (re)launch, from the same underlying
+    cause -- the game is not fully responsive yet: `singleplayer`/`standard` can land
+    before the main menu acts on them at all, so `menu_screen` can still read the main
+    menu's own options well after the clicks were sent
+    (autopilot-20260929-002103.jsonl); and separately, the character-select screen can
+    be reached while its roster is still empty for a beat
+    (autopilot-20260929-002138.jsonl: raised with `no 'Ironclad' option on character
+    select: []`). Retries the clicks, not just the read, until `timeout_s` runs out
+    (bug 6/7), so either delay is absorbed instead of failing on one poll.
+    """
+    deadline = time.monotonic() + timeout_s
+    _select(client, "singleplayer")
+    _select(client, "standard")
+    while True:
+        remaining = max(0.0, deadline - time.monotonic())
+        state = poll_until(
+            client,
+            lambda s: s.get("menu_screen") == "character_select" and not s.get("selection_busy"),
+            timeout_s=min(remaining, 5.0),
+        )
+        if state.get("menu_screen") == "character_select" and _option_names(state):
+            return state
+        if time.monotonic() >= deadline:
+            return state
+        if state.get("menu_screen") != "character_select":
+            _select(client, "singleplayer")
+            _select(client, "standard")
+        else:
+            time.sleep(poll_s)
 
 
 def _reach_the_map(client: ModClient, state: dict, *, timeout_s: float) -> dict:
