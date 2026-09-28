@@ -391,3 +391,113 @@ def test_format_table_shows_the_sts2_repo_and_per_session_act_numbers(tmp_path: 
     assert "46/62 comparable" in table
     assert "Totals by act:" in table
     assert "Totals by category:" in table
+
+
+# --- the run layer (roadmap A3) -----------------------------------------------------
+
+
+RUN_CATEGORIES = ("neow", "card_reward", "shop")
+
+
+class _FakeRunReplay:
+    """Stands in for sts2's `scripts/replay_real_run.py`: `evaluate` returns its document
+    shape, one real run with a seed in its label and one committed capture."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[list[Path], bool]] = []
+
+    def evaluate(self, session_paths: list[Path], *, fixtures: bool = False) -> dict:
+        self.calls.append((list(session_paths), fixtures))
+
+        def stats(compared: int, matched: int, first: str | None = None) -> dict:
+            return {"compared": compared, "matched": matched, "first_divergence": first}
+
+        real = {
+            "label": "SEEDSEED01-a2",
+            "seed": "SEEDSEED01",
+            "ascension": 2,
+            "sources": ["20260926-220853.jsonl floors 0-48"],
+            "floors": 48,
+            "stopped": None,
+            "modded": ["character WATCHER-WATCHER"],
+            "notes": ["MODDED session (...): ..."],
+            "categories": {
+                "neow": stats(1, 1),
+                "card_reward": stats(
+                    7, 2, "floor 8 card_reward cards offered: game=[] emulator=[]"
+                ),
+                "shop": stats(0, 0),
+            },
+        }
+        capture = {
+            "label": "QS2GYXRKWN-a8",
+            "seed": "QS2GYXRKWN",
+            "ascension": 8,
+            "sources": ["QS2GYXRKWN-a8.json"],
+            "floors": 13,
+            "stopped": None,
+            "modded": [],
+            "notes": [],
+            "categories": {c: stats(4, 4) for c in RUN_CATEGORIES},
+        }
+        return {
+            "categories": list(RUN_CATEGORIES),
+            "runs": [real, capture],
+            "unmatched": [],
+            "totals": {c: stats(4, 4) for c in RUN_CATEGORIES},
+            "modded_totals": {
+                "neow": stats(1, 1),
+                "card_reward": stats(
+                    7, 2, "SEEDSEED01-a2: floor 8 card_reward cards offered: game=[] emulator=[]"
+                ),
+                "shop": stats(0, 0),
+            },
+        }
+
+
+def test_the_run_layer_never_carries_a_real_runs_seed() -> None:
+    doc = fsb.build_run_fidelity([Path("a.jsonl")], _FakeRunReplay())
+
+    assert "SEEDSEED01" not in json.dumps(doc)
+    assert doc["runs"][0]["name"] == "20260926-220853.jsonl floors 0-48 (A2)"
+    assert doc["runs"][0]["modded"] == ["character WATCHER-WATCHER"]
+    assert doc["modded_totals"]["card_reward"]["first_divergence"].startswith(
+        "20260926-220853.jsonl floors 0-48 (A2): floor 8"
+    )
+
+
+def test_build_scoreboard_scores_the_run_layer_over_runs_and_captures(tmp_path: Path) -> None:
+    runs_dir = tmp_path / "runs"
+    captures = tmp_path / "captures"
+    runs_dir.mkdir()
+    captures.mkdir()
+    (runs_dir / "20260926-220853.jsonl").write_text("", encoding="utf-8")
+    (captures / "20260925-043442.jsonl").write_text("", encoding="utf-8")
+    run_replay = _FakeRunReplay()
+
+    doc = fsb.build_scoreboard(
+        runs_dir,
+        tmp_path,
+        replay_module=FakeReplayModule({"20260926-220853.jsonl": []}),
+        run_replay_module=run_replay,
+    )
+
+    ((paths, fixtures),) = run_replay.calls
+    assert [p.name for p in paths] == ["20260926-220853.jsonl", "20260925-043442.jsonl"]
+    assert fixtures is True
+    assert doc["runs"]["totals"]["shop"] == {"compared": 4, "matched": 4, "first_divergence": None}
+
+
+def test_format_table_shows_the_run_layer_and_its_modded_runs(tmp_path: Path) -> None:
+    doc = fsb.build_scoreboard(
+        tmp_path,
+        tmp_path,
+        replay_module=FakeReplayModule({}),
+        run_replay_module=_FakeRunReplay(),
+        capture_dirs=[],
+    )
+
+    table = fsb.format_table(doc)
+
+    assert "Run layer (seed-exact replay): 1 unmodded run(s), 1 modded run(s) not counted" in table
+    assert "card_reward      4/4" in table
