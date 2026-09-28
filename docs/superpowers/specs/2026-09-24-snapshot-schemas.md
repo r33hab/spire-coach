@@ -120,12 +120,13 @@ Amended 2026-09-27 (Milestone 1, task A2). A power object, the player's or an en
 | `SURROUNDED_POWER` | `facing` | `"Right"` or `"Left"`: which way the player faces |
 | `POSSESS_SPEED_POWER`, `POSSESS_STRENGTH_POWER` | `stolen` | int ≥ 0: the Dexterity or Strength it has taken from the player so far |
 | `SWIPE_POWER` | `stolen_card`, `stolen_card_upgraded` | the stolen card's id (null if none) and whether it is upgraded |
+| `THIEVERY_POWER` | `stolen_gold` | int ≥ 0: the gold the Gremlin Merc has taken so far (its amount is the rate it steals at); amended 2026-09-28 |
 
 ```jsonc
 {"id": "SURROUNDED_POWER", "amount": 1, "fields": {"facing": "Left"}}
 ```
 
-`fields` is optional and left out when it would be empty; a missing key means unknown, and the converter warns about what that leaves out. All of it is on screen: the block Skittish gains, the player's facing, the debuffs a Possess power applied, and the stolen card in Swipe's tooltip. The mod reports the same keys under power `fields`; for `SWIPE_POWER` the coach falls back to the tooltip's card (`keywords[].id` `"CARD.<ENTRY>"`, `+` when upgraded) when a mod sends no fields.
+`fields` is optional and left out when it would be empty; a missing key means unknown, and the converter warns about what that leaves out. All of it is on screen: the block Skittish gains, the player's facing, the debuffs a Possess power applied, the stolen card in Swipe's tooltip, and the gold that left the player's purse to Thievery. The mod reports the same keys under power `fields`; for `SWIPE_POWER` the coach falls back to the tooltip's card (`keywords[].id` `"CARD.<ENTRY>"`, `+` when upgraded) when a mod sends no fields.
 
 ---
 
