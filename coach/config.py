@@ -47,6 +47,20 @@ def read_token(mods_dir: Path) -> str | None:
     return token or None
 
 
+def read_allow_debug_actions(mods_dir: Path) -> bool:
+    """Whether STS2_MCP.conf has opted into the mod's `debug_*` actions (fight-lab and
+    autopilot need them; both refuse to run without this, per spec)."""
+    try:
+        raw = (mods_dir / CONF_FILE_NAME).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return False
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(data, dict) and data.get("allow_debug_actions") is True
+
+
 def _read_poll_interval_s(env: dict[str, str]) -> float:
     raw = env.get("SPIRE_COACH_POLL_S", "0.2")
     try:
