@@ -28,6 +28,9 @@ class ScriptedMod:
         self.next_map_options = [{"index": 0, "type": "Monster"}]
         self.after_map_choice = "rewards"  # state_type choose_map_node lands on
         self.rewards_items: list[dict] = []
+        self.card_select_cards: list[dict] = []
+        self.rest_site_options: list[dict] = []
+        self.event_options: list[dict] = []
         self.posted: list[dict] = []
         self.extra_state: dict = {}
         self.loaded_mods: list[dict] | None = None
@@ -68,6 +71,15 @@ class ScriptedMod:
             state["map"] = {"next_options": copy.deepcopy(self.next_map_options)}
         if self.state_type == "rewards":
             state["rewards"] = {"items": copy.deepcopy(self.rewards_items), "can_proceed": True}
+        if self.state_type == "card_select":
+            state["card_select"] = {"cards": copy.deepcopy(self.card_select_cards)}
+        if self.state_type == "rest_site":
+            state["rest_site"] = {
+                "options": copy.deepcopy(self.rest_site_options),
+                "can_proceed": False,
+            }
+        if self.state_type == "event":
+            state["event"] = {"options": copy.deepcopy(self.event_options)}
         if self.state_type == "game_over":
             state["game_over"] = {"message": "Run ended.", "options": ["main_menu"]}
         if self.state_type == "menu":

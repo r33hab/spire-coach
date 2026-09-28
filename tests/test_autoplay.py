@@ -31,6 +31,18 @@ def combat(seq=12, *, hp=61, round_=2):
     return state
 
 
+def combat_round(round_: int, hp: int, *, seq: int = 12) -> dict:
+    """`combat_full.json` with `battle.round` and the one alive enemy's (Jaw Worm) hp
+    overridden, for the no-progress detector's round-by-round tracking. The fixture's
+    other two enemies are already dead (hp 0, alive False), so this is the fight's
+    whole total-enemy-hp reading."""
+    state = json.loads((FIXTURES / "combat_full.json").read_text(encoding="utf-8"))
+    state["action_log_seq"] = seq
+    state["battle"]["round"] = round_
+    state["battle"]["enemies"][0]["hp"] = hp
+    return state
+
+
 def rewards():
     return {
         "state_type": "rewards",
@@ -71,6 +83,15 @@ def card_move(index=0, target="JAW_WORM_0"):
         target=target,
         select_index=None,
         label="Strike -> Jaw Worm",
+    )
+
+
+def enemy_choose():
+    """Real capture (fightlab-20260928-213922.jsonl): Knowledge Demon's forced curse
+    pick mid-fight. `pending_selection.source` is "unknown" (an enemy power, not a
+    card/potion/relic), which the engine has no model for."""
+    return json.loads(
+        (FIXTURES / "state_card_select_choose_enemy_source.json").read_text(encoding="utf-8")
     )
 
 
@@ -307,6 +328,90 @@ def test_play_fight_select_then_confirm_posts_both_actions(tmp_path):
         {"action": "combat_select_card", "card_index": 1},
         {"action": "combat_confirm_selection"},
     ]
+
+
+def test_play_fight_forces_a_choice_on_an_enemy_sourced_combat_select(tmp_path):
+    # Knowledge Demon's forced curse pick (real capture): pending_selection.source is
+    # "unknown", so the engine's own analyze() has nothing to search and its "best"
+    # degrades to a no-op ("end_turn", confirmed live) that the mod ignores on this
+    # screen -- previously this replayed the same card_select 300 times until the
+    # move cap gave up on the fight. MovePlayer must force the first offered candidate
+    # instead, the same "first option" doctrine as the non-combat generic fallback
+    # (coach.navigator.advance_one_step), so the screen actually resolves.
+    bridge = ScriptedBridge([combat(), enemy_choose(), rewards()])
+    engine = ScriptedEngine([END_TURN, END_TURN])
+    runlog = RunLog(tmp_path, subdir="runs", prefix="test-")
+    player = MovePlayer(bridge, engine, runlog, game_version="v0.107.1")
+
+    outcome = player.play_fight(bridge.get_state())
+
+    assert outcome.ok is True
+    assert outcome.state["state_type"] == "rewards"
+    assert bridge.posted == [
+        {"action": "end_turn"},
+        {"action": "combat_select_card", "card_index": 0},
+        {"action": "combat_confirm_selection"},
+    ]
+
+
+def test_play_fight_gives_up_on_no_progress_past_the_round_cap(tmp_path):
+    # Item 7 ("no hopeless repeats"): a wall like The Insatiable never lets total enemy
+    # hp reach a new low. With no_progress_rounds=3, a new low must land by round 4 or
+    # this gives up instead of burning the full move cap; here hp sits at 50 the whole
+    # way (rounds 1-5), which must trigger during round 5 (stalled_rounds: 0,1,2,3,4).
+    states = [combat_round(r, 50, seq=r) for r in range(1, 6)]
+    bridge = ScriptedBridge(states)
+    engine = ScriptedEngine([END_TURN])
+    runlog = RunLog(tmp_path, subdir="runs", prefix="test-")
+    player = MovePlayer(bridge, engine, runlog, game_version="v0.107.1", no_progress_rounds=3)
+
+    outcome = player.play_fight(bridge.get_state())
+
+    assert outcome.ok is False
+    error_records = [r for r in records(runlog) if r["kind"] == "error"]
+    assert any("no progress" in r["payload"]["error"] for r in error_records)
+    # gave up mid-round 5, well short of exhausting engine.analyze_calls on every move
+    assert engine.analyze_calls  # some analysis happened before giving up
+    assert bridge.posted == [{"action": "end_turn"}] * 4  # 4 turns played, 5th aborted
+
+
+def test_play_fight_does_not_give_up_while_enemy_hp_keeps_dropping(tmp_path):
+    states = [combat_round(r, 50 - 10 * r, seq=r) for r in range(1, 5)]  # 40,30,20,10
+    bridge = ScriptedBridge([*states, rewards()])
+    engine = ScriptedEngine([END_TURN])
+    runlog = RunLog(tmp_path, subdir="runs", prefix="test-")
+    player = MovePlayer(bridge, engine, runlog, game_version="v0.107.1", no_progress_rounds=3)
+
+    outcome = player.play_fight(bridge.get_state())
+
+    assert outcome.ok is True
+    assert not any(
+        "no progress" in r["payload"].get("error", "") for r in records(runlog) if r["kind"] == "error"
+    )
+
+
+def test_play_fight_tolerates_a_plateau_shorter_than_the_cap_like_the_decimillipede(tmp_path):
+    # Real shape (fightlab-20260928-213922.jsonl): total enemy hp can sit flat or even
+    # rise for a few rounds (segments reattaching) before dropping to a new low again --
+    # a slow win, not a stall. Plateau length 2 here must survive a cap of 3.
+    states = [
+        combat_round(1, 100),
+        combat_round(2, 90),  # new low (0)
+        combat_round(3, 95),  # stalled 1
+        combat_round(4, 92),  # stalled 2
+        combat_round(5, 80),  # new low again (resets to 0) -- must not have tripped yet
+    ]
+    bridge = ScriptedBridge([*states, rewards()])
+    engine = ScriptedEngine([END_TURN])
+    runlog = RunLog(tmp_path, subdir="runs", prefix="test-")
+    player = MovePlayer(bridge, engine, runlog, game_version="v0.107.1", no_progress_rounds=3)
+
+    outcome = player.play_fight(bridge.get_state())
+
+    assert outcome.ok is True
+    assert not any(
+        "no progress" in r["payload"].get("error", "") for r in records(runlog) if r["kind"] == "error"
+    )
 
 
 def test_play_fight_gives_up_after_max_moves(tmp_path):

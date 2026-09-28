@@ -198,13 +198,30 @@ def _play_one(
         else:
             runlog.append("buffer", {"amount": buffer_hp, "encounter": encounter.name})
     cards = deckseed.sample_deck(encounter.act, shards_root=shards_root, rng=rng)
+    staged: list[str] = []
     if cards:
-        deckseed.stage_deck(client, cards)
+        staged = deckseed.stage_deck(client, cards)
     try:
         client.post_action({"action": "debug_force_play_phase"})
     except BridgeError:
         pass
     state = autoplay.wait_settled(client)
+    if staged:
+        # Spec: "verify it from the game state after setup" -- debug_add_card answers
+        # "ok" whether or not the card actually reached a pile this fight can draw from
+        # (fire-and-forget, and the wrong pile name once passed every check silently).
+        missing = deckseed.verify_staged(state, staged)
+        if missing:
+            runlog.append(
+                "error",
+                {
+                    "error": (
+                        f"fightlab: {len(missing)}/{len(staged)} sampled card(s) missing "
+                        f"from the deck after setup: {sorted(set(missing))}"
+                    ),
+                    "encounter": encounter.name,
+                },
+            )
     moves_before = player.stats.moves
     outcome = player.play_fight(state)
     moves = player.stats.moves - moves_before

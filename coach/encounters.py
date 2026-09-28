@@ -169,14 +169,27 @@ class FightPicker:
     fast, repeatable death from being replayed over and over: a boss that kills the
     player in ten moves stops looking cheap the moment it has been fought once, since
     every still-untried encounter reads as a bigger gap than ten moves.
+
+    No hopeless repeats (spec), the other half of that: a wall that ALWAYS dies fast
+    (The Insatiable kills in 5 turns unless specific cards are played; Aeonglass and
+    Entomancer flood the hand instead of dealing damage) never stops looking cheap by
+    move count alone -- every loss keeps it at the front of the queue. `max_attempts`
+    caps how many times one encounter is offered this session; once it is reached and
+    something else remains untried or cheaper, this moves on for good. Only when every
+    remaining candidate is capped does a capped one come back (better to retry a wall
+    than raise out of fights the caller still asked to play).
     """
 
-    def __init__(self, ranked: Sequence[Encounter]) -> None:
+    DEFAULT_MAX_ATTEMPTS = 3
+
+    def __init__(self, ranked: Sequence[Encounter], *, max_attempts: int = DEFAULT_MAX_ATTEMPTS) -> None:
         if not ranked:
             raise ValueError("no encounters to choose from (check --acts)")
         self._ranked = list(ranked)
         self._rank_index = {encounter.name: i for i, encounter in enumerate(self._ranked)}
         self._moves_this_session: dict[str, int] = dict.fromkeys(self._rank_index, 0)
+        self._attempts: dict[str, int] = dict.fromkeys(self._rank_index, 0)
+        self._max_attempts = max_attempts
         self._last: str | None = None
 
     def __len__(self) -> int:
@@ -184,6 +197,9 @@ class FightPicker:
 
     def next(self) -> Encounter:
         candidates = self._ranked
+        under_cap = [e for e in candidates if self._attempts[e.name] < self._max_attempts]
+        if under_cap:
+            candidates = under_cap
         if self._last is not None and len(candidates) > 1:
             others = [e for e in candidates if e.name != self._last]
             if others:
@@ -196,6 +212,8 @@ class FightPicker:
 
     def record(self, encounter: Encounter, moves: int) -> None:
         """Add `moves` (however many were actually recorded, win, death or setup
-        failure) to `encounter`'s running total for this session."""
+        failure) to `encounter`'s running total for this session, and count one
+        attempt against its cap."""
         if encounter.name in self._moves_this_session:
             self._moves_this_session[encounter.name] += moves
+            self._attempts[encounter.name] += 1

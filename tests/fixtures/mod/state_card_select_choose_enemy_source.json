@@ -1,0 +1,619 @@
+{
+  "state_type": "card_select",
+  "mod_version": "0.4.0",
+  "mod_commit": "d7683d3",
+  "schema_version": 4,
+  "action_log_seq": 257,
+  "time_scale": 3,
+  "rooms_entered": 17,
+  "card_select": {
+    "screen_type": "choose",
+    "prompt": "Choose a card.",
+    "cards": [
+      {
+        "id": "DISINTEGRATION",
+        "name": "Disintegration",
+        "type": "Status",
+        "cost": "0",
+        "star_cost": null,
+        "description": "At the end of your turn, take 6 damage.",
+        "rarity": "Status",
+        "is_upgraded": false,
+        "is_upgradable": false,
+        "upgrade_level": 0,
+        "max_upgrade_level": 0,
+        "keywords": [],
+        "enchantment": null,
+        "affliction": null,
+        "fields": {},
+        "unplayable": false,
+        "index": 0,
+        "uid": "DISINTEGRATION#0"
+      },
+      {
+        "id": "MIND_ROT",
+        "name": "Mind Rot",
+        "type": "Status",
+        "cost": "0",
+        "star_cost": null,
+        "description": "Draw 1 fewer card each turn.",
+        "rarity": "Status",
+        "is_upgraded": false,
+        "is_upgradable": false,
+        "upgrade_level": 0,
+        "max_upgrade_level": 0,
+        "keywords": [],
+        "enchantment": null,
+        "affliction": null,
+        "fields": {},
+        "unplayable": false,
+        "index": 1,
+        "uid": "MIND_ROT#0"
+      }
+    ],
+    "can_skip": false,
+    "preview_showing": false,
+    "can_confirm": false,
+    "can_cancel": false,
+    "selection": {
+      "kind": "CHOOSE",
+      "pile": null,
+      "prompt_key": "gameplay_ui.CHOOSE_CARD_HEADER",
+      "source": {
+        "type": "unknown",
+        "id": null,
+        "uid": null
+      },
+      "min": 1,
+      "max": 1,
+      "can_skip": false,
+      "selected": []
+    }
+  },
+  "in_combat": true,
+  "battle": {
+    "round": 1,
+    "turn": "enemy",
+    "is_play_phase": false,
+    "enemies": [
+      {
+        "entity_id": "KNOWLEDGE_DEMON_0",
+        "combat_id": 1,
+        "name": "Knowledge Demon",
+        "alive": true,
+        "hp": 393,
+        "max_hp": 399,
+        "block": 0,
+        "status": [],
+        "intents": [
+          {
+            "type": "Debuff",
+            "label": "",
+            "title": "Strategic",
+            "description": "This enemy intends to apply a Debuff to you."
+          }
+        ],
+        "move_id": "CURSE_OF_KNOWLEDGE_MOVE",
+        "is_stunned": false,
+        "state_log": [
+          "CURSE_OF_KNOWLEDGE_MOVE"
+        ],
+        "slot": 0,
+        "ai_fields": {
+          "_curseOfKnowledgeCounter": 0,
+          "_isBurnt": false,
+          "CurseOfKnowledgeCounter": 0,
+          "SlapDamage": 18,
+          "PonderDamage": 13,
+          "KnowledgeOverwhelmingDamage": 9,
+          "PonderStrength": 3,
+          "IsBurnt": false
+        }
+      }
+    ],
+    "allies": [],
+    "history": {
+      "cards_played_this_turn": 0,
+      "attacks_played_this_turn": 0,
+      "skills_played_this_turn": 0,
+      "powers_played_this_turn": 0,
+      "cards_played_this_combat": 3
+    }
+  },
+  "run": {
+    "act": 2,
+    "floor": 2,
+    "ascension": 10,
+    "map_coord": {
+      "col": 3,
+      "row": 0
+    },
+    "start_time": 1790624603
+  },
+  "player": {
+    "character": "The Ironclad",
+    "character_id": "IRONCLAD",
+    "hp": 5076,
+    "max_hp": 5080,
+    "block": 10,
+    "energy": 0,
+    "max_energy": 3,
+    "hand": [],
+    "draw_pile_count": 6,
+    "discard_pile_count": 4,
+    "exhaust_pile_count": 1,
+    "draw_pile": [
+      {
+        "uid": "BASH#0",
+        "name": "Bash",
+        "cost": "2",
+        "star_cost": null,
+        "description": "Deal 8 damage. Apply 2 Vulnerable.",
+        "id": "BASH",
+        "is_upgraded": false,
+        "upgrade_level": 0,
+        "enchantment": null,
+        "affliction": null,
+        "fields": {},
+        "unplayable": false
+      },
+      {
+        "uid": "DEFEND_IRONCLAD#1",
+        "name": "Defend",
+        "cost": "1",
+        "star_cost": null,
+        "description": "Gain 5 Block.",
+        "id": "DEFEND_IRONCLAD",
+        "is_upgraded": false,
+        "upgrade_level": 0,
+        "enchantment": null,
+        "affliction": null,
+        "fields": {},
+        "unplayable": false
+      },
+      {
+        "uid": "DEFEND_IRONCLAD#2",
+        "name": "Defend",
+        "cost": "1",
+        "star_cost": null,
+        "description": "Gain 5 Block.",
+        "id": "DEFEND_IRONCLAD",
+        "is_upgraded": false,
+        "upgrade_level": 0,
+        "enchantment": null,
+        "affliction": null,
+        "fields": {},
+        "unplayable": false
+      },
+      {
+        "uid": "STRIKE_IRONCLAD#1",
+        "name": "Strike",
+        "cost": "1",
+        "star_cost": null,
+        "description": "Deal 6 damage.",
+        "id": "STRIKE_IRONCLAD",
+        "is_upgraded": false,
+        "upgrade_level": 0,
+        "enchantment": null,
+        "affliction": null,
+        "fields": {},
+        "unplayable": false
+      },
+      {
+        "uid": "STRIKE_IRONCLAD#4",
+        "name": "Strike",
+        "cost": "1",
+        "star_cost": null,
+        "description": "Deal 6 damage.",
+        "id": "STRIKE_IRONCLAD",
+        "is_upgraded": false,
+        "upgrade_level": 0,
+        "enchantment": null,
+        "affliction": null,
+        "fields": {},
+        "unplayable": false
+      },
+      {
+        "uid": "STRIKE_IRONCLAD#2",
+        "name": "Strike",
+        "cost": "1",
+        "star_cost": null,
+        "description": "Deal 6 damage.",
+        "id": "STRIKE_IRONCLAD",
+        "is_upgraded": false,
+        "upgrade_level": 0,
+        "enchantment": null,
+        "affliction": null,
+        "fields": {},
+        "unplayable": false
+      }
+    ],
+    "discard_pile": [
+      {
+        "uid": "DEFEND_IRONCLAD#0",
+        "name": "Defend",
+        "cost": "1",
+        "star_cost": null,
+        "description": "Gain 5 Block.",
+        "id": "DEFEND_IRONCLAD",
+        "is_upgraded": false,
+        "upgrade_level": 0,
+        "enchantment": null,
+        "affliction": null,
+        "fields": {},
+        "unplayable": false
+      },
+      {
+        "uid": "STRIKE_IRONCLAD#3",
+        "name": "Strike",
+        "cost": "1",
+        "star_cost": null,
+        "description": "Deal 6 damage.",
+        "id": "STRIKE_IRONCLAD",
+        "is_upgraded": false,
+        "upgrade_level": 0,
+        "enchantment": null,
+        "affliction": null,
+        "fields": {},
+        "unplayable": false
+      },
+      {
+        "uid": "DEFEND_IRONCLAD#3",
+        "name": "Defend",
+        "cost": "1",
+        "star_cost": null,
+        "description": "Gain 5 Block.",
+        "id": "DEFEND_IRONCLAD",
+        "is_upgraded": false,
+        "upgrade_level": 0,
+        "enchantment": null,
+        "affliction": null,
+        "fields": {},
+        "unplayable": false
+      },
+      {
+        "uid": "STRIKE_IRONCLAD#0",
+        "name": "Strike",
+        "cost": "1",
+        "star_cost": null,
+        "description": "Deal 6 damage.",
+        "id": "STRIKE_IRONCLAD",
+        "is_upgraded": false,
+        "upgrade_level": 0,
+        "enchantment": null,
+        "affliction": null,
+        "fields": {},
+        "unplayable": false
+      }
+    ],
+    "exhaust_pile": [
+      {
+        "uid": "ASCENDERS_BANE#0",
+        "name": "Ascender's Bane",
+        "cost": "0",
+        "star_cost": null,
+        "description": "Unplayable. Ethereal. Eternal.",
+        "id": "ASCENDERS_BANE",
+        "is_upgraded": false,
+        "upgrade_level": 0,
+        "enchantment": null,
+        "affliction": null,
+        "fields": {},
+        "unplayable": true
+      }
+    ],
+    "play_pile": [],
+    "discard_pile_ordered": [
+      {
+        "id": "DEFEND_IRONCLAD",
+        "is_upgraded": false,
+        "uid": "DEFEND_IRONCLAD#0"
+      },
+      {
+        "id": "STRIKE_IRONCLAD",
+        "is_upgraded": false,
+        "uid": "STRIKE_IRONCLAD#3"
+      },
+      {
+        "id": "DEFEND_IRONCLAD",
+        "is_upgraded": false,
+        "uid": "DEFEND_IRONCLAD#3"
+      },
+      {
+        "id": "STRIKE_IRONCLAD",
+        "is_upgraded": false,
+        "uid": "STRIKE_IRONCLAD#0"
+      }
+    ],
+    "hand_ordered": [],
+    "exhaust_pile_ordered": [
+      {
+        "id": "ASCENDERS_BANE",
+        "is_upgraded": false,
+        "uid": "ASCENDERS_BANE#0"
+      }
+    ],
+    "gold": 99,
+    "status": [],
+    "relics": [
+      {
+        "id": "BURNING_BLOOD",
+        "name": "Burning Blood",
+        "description": "At the end of combat, heal 6 HP.",
+        "counter": null,
+        "keywords": [],
+        "status": "Normal",
+        "is_used_up": false,
+        "stack_count": 1,
+        "saved": null,
+        "fields": {}
+      }
+    ],
+    "potions": [],
+    "max_potion_slots": 2,
+    "deck_count": 11,
+    "deck": [
+      {
+        "id": "STRIKE_IRONCLAD",
+        "name": "Strike",
+        "type": "Attack",
+        "cost": "1",
+        "star_cost": null,
+        "description": "Deal 6 damage.",
+        "rarity": "Basic",
+        "is_upgraded": false,
+        "is_upgradable": true,
+        "upgrade_level": 0,
+        "max_upgrade_level": 1,
+        "keywords": [],
+        "enchantment": null,
+        "affliction": null,
+        "fields": {},
+        "unplayable": false,
+        "index": 0
+      },
+      {
+        "id": "STRIKE_IRONCLAD",
+        "name": "Strike",
+        "type": "Attack",
+        "cost": "1",
+        "star_cost": null,
+        "description": "Deal 6 damage.",
+        "rarity": "Basic",
+        "is_upgraded": false,
+        "is_upgradable": true,
+        "upgrade_level": 0,
+        "max_upgrade_level": 1,
+        "keywords": [],
+        "enchantment": null,
+        "affliction": null,
+        "fields": {},
+        "unplayable": false,
+        "index": 1
+      },
+      {
+        "id": "STRIKE_IRONCLAD",
+        "name": "Strike",
+        "type": "Attack",
+        "cost": "1",
+        "star_cost": null,
+        "description": "Deal 6 damage.",
+        "rarity": "Basic",
+        "is_upgraded": false,
+        "is_upgradable": true,
+        "upgrade_level": 0,
+        "max_upgrade_level": 1,
+        "keywords": [],
+        "enchantment": null,
+        "affliction": null,
+        "fields": {},
+        "unplayable": false,
+        "index": 2
+      },
+      {
+        "id": "STRIKE_IRONCLAD",
+        "name": "Strike",
+        "type": "Attack",
+        "cost": "1",
+        "star_cost": null,
+        "description": "Deal 6 damage.",
+        "rarity": "Basic",
+        "is_upgraded": false,
+        "is_upgradable": true,
+        "upgrade_level": 0,
+        "max_upgrade_level": 1,
+        "keywords": [],
+        "enchantment": null,
+        "affliction": null,
+        "fields": {},
+        "unplayable": false,
+        "index": 3
+      },
+      {
+        "id": "STRIKE_IRONCLAD",
+        "name": "Strike",
+        "type": "Attack",
+        "cost": "1",
+        "star_cost": null,
+        "description": "Deal 6 damage.",
+        "rarity": "Basic",
+        "is_upgraded": false,
+        "is_upgradable": true,
+        "upgrade_level": 0,
+        "max_upgrade_level": 1,
+        "keywords": [],
+        "enchantment": null,
+        "affliction": null,
+        "fields": {},
+        "unplayable": false,
+        "index": 4
+      },
+      {
+        "id": "DEFEND_IRONCLAD",
+        "name": "Defend",
+        "type": "Skill",
+        "cost": "1",
+        "star_cost": null,
+        "description": "Gain 5 Block.",
+        "rarity": "Basic",
+        "is_upgraded": false,
+        "is_upgradable": true,
+        "upgrade_level": 0,
+        "max_upgrade_level": 1,
+        "keywords": [
+          {
+            "name": "Block",
+            "description": "Until next turn, prevents damage.",
+            "id": "LocString with Title=static_hover_tips.BLOCK.title and Description=static_hover_tips.BLOCK.description"
+          }
+        ],
+        "enchantment": null,
+        "affliction": null,
+        "fields": {},
+        "unplayable": false,
+        "index": 5
+      },
+      {
+        "id": "DEFEND_IRONCLAD",
+        "name": "Defend",
+        "type": "Skill",
+        "cost": "1",
+        "star_cost": null,
+        "description": "Gain 5 Block.",
+        "rarity": "Basic",
+        "is_upgraded": false,
+        "is_upgradable": true,
+        "upgrade_level": 0,
+        "max_upgrade_level": 1,
+        "keywords": [
+          {
+            "name": "Block",
+            "description": "Until next turn, prevents damage.",
+            "id": "LocString with Title=static_hover_tips.BLOCK.title and Description=static_hover_tips.BLOCK.description"
+          }
+        ],
+        "enchantment": null,
+        "affliction": null,
+        "fields": {},
+        "unplayable": false,
+        "index": 6
+      },
+      {
+        "id": "DEFEND_IRONCLAD",
+        "name": "Defend",
+        "type": "Skill",
+        "cost": "1",
+        "star_cost": null,
+        "description": "Gain 5 Block.",
+        "rarity": "Basic",
+        "is_upgraded": false,
+        "is_upgradable": true,
+        "upgrade_level": 0,
+        "max_upgrade_level": 1,
+        "keywords": [
+          {
+            "name": "Block",
+            "description": "Until next turn, prevents damage.",
+            "id": "LocString with Title=static_hover_tips.BLOCK.title and Description=static_hover_tips.BLOCK.description"
+          }
+        ],
+        "enchantment": null,
+        "affliction": null,
+        "fields": {},
+        "unplayable": false,
+        "index": 7
+      },
+      {
+        "id": "DEFEND_IRONCLAD",
+        "name": "Defend",
+        "type": "Skill",
+        "cost": "1",
+        "star_cost": null,
+        "description": "Gain 5 Block.",
+        "rarity": "Basic",
+        "is_upgraded": false,
+        "is_upgradable": true,
+        "upgrade_level": 0,
+        "max_upgrade_level": 1,
+        "keywords": [
+          {
+            "name": "Block",
+            "description": "Until next turn, prevents damage.",
+            "id": "LocString with Title=static_hover_tips.BLOCK.title and Description=static_hover_tips.BLOCK.description"
+          }
+        ],
+        "enchantment": null,
+        "affliction": null,
+        "fields": {},
+        "unplayable": false,
+        "index": 8
+      },
+      {
+        "id": "BASH",
+        "name": "Bash",
+        "type": "Attack",
+        "cost": "2",
+        "star_cost": null,
+        "description": "Deal 8 damage. Apply 2 Vulnerable.",
+        "rarity": "Basic",
+        "is_upgraded": false,
+        "is_upgradable": true,
+        "upgrade_level": 0,
+        "max_upgrade_level": 1,
+        "keywords": [
+          {
+            "name": "Vulnerable",
+            "description": "Vulnerable creatures take 50% more damage from Attacks.",
+            "id": "POWER.VULNERABLE_POWER"
+          }
+        ],
+        "enchantment": null,
+        "affliction": null,
+        "fields": {},
+        "unplayable": false,
+        "index": 9
+      },
+      {
+        "id": "ASCENDERS_BANE",
+        "name": "Ascender's Bane",
+        "type": "Curse",
+        "cost": "0",
+        "star_cost": null,
+        "description": "Unplayable. Ethereal. Eternal.",
+        "rarity": "Curse",
+        "is_upgraded": false,
+        "is_upgradable": false,
+        "upgrade_level": 0,
+        "max_upgrade_level": 0,
+        "keywords": [
+          {
+            "name": "Eternal",
+            "description": "Cannot be removed or transformed from your Deck.",
+            "id": "LocString with Title=card_keywords.ETERNAL.title and Description=card_keywords.ETERNAL.description"
+          },
+          {
+            "name": "Unplayable",
+            "description": "Unplayable cards cannot be played.",
+            "id": "LocString with Title=card_keywords.UNPLAYABLE.title and Description=card_keywords.UNPLAYABLE.description"
+          },
+          {
+            "name": "Ethereal",
+            "description": "If this card is in your Hand at the end of this turn, it is Exhausted.",
+            "id": "LocString with Title=card_keywords.ETHEREAL.title and Description=card_keywords.ETHEREAL.description"
+          },
+          {
+            "name": "Exhaust",
+            "description": "Removed until the end of combat.",
+            "id": "LocString with Title=card_keywords.EXHAUST.title and Description=card_keywords.EXHAUST.description"
+          }
+        ],
+        "enchantment": null,
+        "affliction": null,
+        "fields": {},
+        "unplayable": true,
+        "index": 10
+      }
+    ]
+  },
+  "is_resolving": false
+}

@@ -16,9 +16,17 @@ Limits, as the spec asks to document:
   in the wanted act. Relics, potions, gold and starting energy are not replicated: the
   mod has no `debug_add_relic`/`debug_add_potion`, and reproducing them exactly would
   need RNG state a shard does not carry either.
-- Cards are staged into the `deck` pile once combat has started (`debug_add_card`
-  needs combat in progress), so they join the fight's future draws and reshuffles;
-  they are not guaranteed to be in the turn-1 opening hand.
+- Cards are staged into the in-combat `draw` pile once combat has started
+  (`debug_add_card` needs combat in progress), so they join the fight's future draws
+  and reshuffles; they are not guaranteed to be in the turn-1 opening hand. `draw`,
+  not the mod's `deck` pile option: that one is the run's persistent master deck
+  (STS2MCP `debug_upgrade_deck` targets the same pile), already shuffled into this
+  combat's own piles before `debug_start_encounter` returns -- a card added there
+  cannot appear in the fight already in progress, only in a later one. An earlier
+  version of this module staged into `deck` by mistake, which is why real Act 2/3
+  fight-lab fights kept showing a starter-like deck no matter what shard was sampled
+  (`debug_add_card` always answered "ok"; the cards were never dropped, just added
+  somewhere this fight could not reach them).
 - A sampled entry's upgrade flag is read as `bool(entry[1])` from the shard's
   `[card_id, upgraded, enchantment_id, reserved]` tuple. That shape is inferred from
   the shards themselves (the training design was not read for this), not confirmed
@@ -135,10 +143,13 @@ def _card_entries(sts2_repo: Path) -> dict[int, str]:
     return ids.card_entries()
 
 
-def stage_deck(client: ModClient, cards: list[SampledCard], *, pile: str = "deck") -> list[str]:
-    """`debug_add_card` every sampled card (combat must already be in progress).
-    Returns the entry ids the mod accepted; one it refuses (unrecognized on this game
-    build) is skipped rather than failing the whole deck."""
+def stage_deck(client: ModClient, cards: list[SampledCard], *, pile: str = "draw") -> list[str]:
+    """`debug_add_card` every sampled card into the current combat's `draw` pile
+    (combat must already be in progress) -- not the mod's `deck` pile option, the run's
+    persistent master deck, which this fight's own piles were already shuffled from
+    before this ever runs (see the module docstring). Returns the entry ids the mod
+    accepted; one it refuses (unrecognized on this game build) is skipped rather than
+    failing the whole deck."""
     added = []
     for card in cards:
         try:
@@ -154,3 +165,35 @@ def stage_deck(client: ModClient, cards: list[SampledCard], *, pile: str = "deck
             continue
         added.append(card.entry_id)
     return added
+
+
+_COMBAT_PILE_KEYS = ("hand", "draw_pile", "discard_pile", "exhaust_pile")
+
+
+def verify_staged(state: dict, entry_ids: list[str]) -> list[str]:
+    """Which of `entry_ids` (`stage_deck`'s own return value: the ones the mod
+    answered "ok" for) cannot be found anywhere in `state`'s combat piles. Empty means
+    every staged card is accounted for.
+
+    The spec asks for this explicitly ("verify it from the game state after setup"):
+    `stage_deck` only reports what `debug_add_card` *answered*, not where the card
+    actually ended up -- exactly how staging into the mod's `deck` pile (the run's
+    persistent master deck, not this fight's) silently produced a starter-like fight
+    with every call still answering "ok". Checks every combat pile, not just `draw`
+    (`stage_deck`'s own target), since `debug_add_card` is fire-and-forget (STS2MCP
+    McpMod.Debug.cs) and a card already drawn or discarded by the time this reads the
+    state is just as much proof it landed as one still sitting in the draw pile.
+
+    Duplicate entry ids are matched one-for-one (three sampled Strikes need three
+    Strikes found, not one found excusing all three)."""
+    player = state.get("player") or {}
+    found: list[str] = []
+    for key in _COMBAT_PILE_KEYS:
+        for card in player.get(key) or []:
+            if isinstance(card, dict) and card.get("id"):
+                found.append(card["id"])
+    missing = list(entry_ids)
+    for card_id in found:
+        if card_id in missing:
+            missing.remove(card_id)
+    return missing

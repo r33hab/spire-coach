@@ -212,6 +212,15 @@ def enter_act(
     per act trusted on faith, this re-reads `run.act` after each one and keeps calling
     until it actually reads the wanted act or `max_attempts` runs out, which is what
     catches a call that did not take -- the same request, tried again, plainly does.
+
+    Also confirmed live: a fight-lab session that abandoned a run right after a
+    debug-started boss win and immediately embarked the next one hit a
+    NullReferenceException inside that same call (mod-side race fixed in STS2MCP, but
+    worth tolerating here too rather than trusting it is gone for good) -- the mod
+    answered with an HTTP failure `post_action` raises as `BridgeError` instead of the
+    usual `{"status": "ok"}` that just did not take. One bad attempt must not spend the
+    whole retry budget: it is treated the same as a call that silently did not take,
+    not raised immediately, so a later attempt still gets its turn.
     """
     state = client.get_state()
     current = act_of(state)
@@ -220,7 +229,11 @@ def enter_act(
     for _ in range(max_attempts):
         if current >= act:
             return state
-        client.post_action({"action": "debug_enter_next_act"})
+        try:
+            client.post_action({"action": "debug_enter_next_act"})
+        except BridgeError:
+            time.sleep(3.0)
+            continue
         before = current
         state = poll_until(
             client, lambda s, before=before: (act_of(s) or before) != before, timeout_s=timeout_s
@@ -266,8 +279,10 @@ def advance_one_step(client: ModClient, state: dict) -> dict:
         _try(client, {"action": "claim_reward", "index": take[0]["index"]}) if take else _try(
             client, {"action": "proceed"}
         )
-    elif state_type in ("card_reward", "card_select"):
+    elif state_type == "card_reward":
         _try(client, {"action": "skip_card_reward"})
+    elif state_type == "card_select":
+        _select_first_card(client, state)
     elif state_type == "map":
         options = (state.get("map") or {}).get("next_options") or []
         pick = next((o for o in options if o.get("type") in ("Monster", "Elite")), None)
@@ -281,8 +296,16 @@ def advance_one_step(client: ModClient, state: dict) -> dict:
         _try(client, {"action": "proceed"})
     elif state_type == "rest_site":
         options = (state.get("rest_site") or {}).get("options") or []
-        if options:
-            _try(client, {"action": "choose_rest_option", "index": 0})
+        # Real captures (data/runs/): each option carries its own is_enabled (HEAL is
+        # disabled at full HP; SMITH is disabled with no upgradable card left). The
+        # first option in the list is not always the first usable one, and
+        # choose_rest_option on a disabled one is a no-op the mod answers with an
+        # error, not a BridgeError this module could catch (McpMod.Actions.cs
+        # ExecuteChooseRestOption) -- picking blindly by position silently wasted the
+        # rest site whenever that happened.
+        pick = next((o for o in options if o.get("is_enabled", True)), None)
+        if pick is not None:
+            _try(client, {"action": "choose_rest_option", "index": pick["index"]})
         _try(client, {"action": "proceed"})
     elif state_type == "event":
         options = (state.get("event") or {}).get("options") or []
@@ -295,6 +318,28 @@ def advance_one_step(client: ModClient, state: dict) -> dict:
     else:
         _try(client, {"action": "proceed"})
     return client.get_state()
+
+
+def _select_first_card(client: ModClient, state: dict) -> None:
+    """The non-combat `card_select` grid (rest-site Smith's upgrade pick, a shop's
+    removal, an event's transform, Neow's transform-a-card bonus): pick the first
+    offered card, then confirm.
+
+    Confirmed live (real captures under data/runs/, screen_type "upgrade"/"select"/
+    "simple_select", always `selection.kind: "GRID"`): this state_type is a different
+    screen from `card_reward`
+    (STS2MCP's `NCardGridSelectionScreen`/`select_card`+`confirm_selection`, not
+    `NCardRewardSelectionScreen`/`skip_card_reward`) -- sending `skip_card_reward` here
+    has no handler on this screen and left it up forever. `select_card`'s own
+    confirmation can close the screen by itself on a single-pick grid with manual
+    confirmation off, so `confirm_selection` afterward is best-effort (`_try`), same as
+    every other multi-action branch here (`rest_site`, `treasure`)."""
+    cards = (state.get("card_select") or {}).get("cards") or []
+    if not cards:
+        return
+    index = cards[0].get("index", 0)
+    if _try(client, {"action": "select_card", "index": index}) is not None:
+        _try(client, {"action": "confirm_selection"})
 
 
 def _try(client: ModClient, action: dict) -> dict | None:

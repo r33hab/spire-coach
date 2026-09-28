@@ -195,6 +195,49 @@ def test_run_skips_staging_when_no_deck_is_sampled(tmp_path, monkeypatch):
     assert called == []
 
 
+def test_run_logs_when_staged_cards_are_missing_after_setup(tmp_path, monkeypatch):
+    # Item 5 ("verify it from the game state after setup") and the regression fixed in
+    # coach.deckseed.stage_deck (pile "draw", not the mod's "deck" option): debug_add_card
+    # can answer "ok" for every sampled card and still leave none of them reachable by
+    # this fight. ScriptedMod's default combat state never carries hand/draw_pile/etc,
+    # so every staged card here comes up missing -- the same shape a real fight showed
+    # when cards landed in the wrong pile.
+    mod = make_mod()
+    player = StubPlayer([_Scripted(won())])
+    sampled = [SampledCard("MOLTEN_FIST", True)]
+    monkeypatch.setattr(fightlab.deckseed, "sample_deck", lambda *a, **k: sampled)
+    monkeypatch.setattr(fightlab.deckseed, "stage_deck", lambda *a, **k: ["MOLTEN_FIST"])
+
+    _, runlog = run_lab(mod, player, tmp_path, fights=1)
+
+    lines = [json.loads(line) for line in runlog.path.read_text(encoding="utf-8").splitlines()]
+    errors = [line for line in lines if line["kind"] == "error"]
+    assert any("MOLTEN_FIST" in e["payload"]["error"] for e in errors)
+
+
+def test_run_does_not_warn_when_staged_cards_are_found_after_setup(tmp_path, monkeypatch):
+    mod = make_mod()
+    mod.extra_state = {
+        "player": {
+            "hp": 80,
+            "max_hp": 80,
+            "hand": [{"id": "MOLTEN_FIST"}],
+            "draw_pile": [],
+            "discard_pile": [],
+            "exhaust_pile": [],
+        }
+    }
+    player = StubPlayer([_Scripted(won())])
+    sampled = [SampledCard("MOLTEN_FIST", True)]
+    monkeypatch.setattr(fightlab.deckseed, "sample_deck", lambda *a, **k: sampled)
+    monkeypatch.setattr(fightlab.deckseed, "stage_deck", lambda *a, **k: ["MOLTEN_FIST"])
+
+    _, runlog = run_lab(mod, player, tmp_path, fights=1)
+
+    lines = [json.loads(line) for line in runlog.path.read_text(encoding="utf-8").splitlines()]
+    assert [line for line in lines if line["kind"] == "error"] == []
+
+
 def test_session_header_records_loaded_mods_when_the_mod_reports_them(tmp_path):
     mod = make_mod()
     mod.loaded_mods = [{"id": "watcher", "name": "Watcher", "affects_gameplay": True}]
