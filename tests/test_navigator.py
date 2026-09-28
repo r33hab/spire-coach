@@ -9,6 +9,7 @@ import time
 import pytest
 from fakes.fake_mod import ScriptedMod
 
+from coach.bridge.client import BridgeError
 from coach.config import CONF_FILE_NAME, Config
 from coach.navigator import (
     NavigatorError,
@@ -107,6 +108,47 @@ def test_enter_act_calls_debug_enter_next_act_the_right_number_of_times():
     assert sum(1 for a in mod.posted if a.get("action") == "debug_enter_next_act") == 2
 
 
+def test_enter_act_retries_past_a_transient_bridge_error():
+    # Task item 6 (fight-lab act jump): a hard mod-side failure on one
+    # debug_enter_next_act call (STS2MCP had a NullReferenceException here) must not
+    # spend the whole retry budget on that single attempt -- the same "keep calling
+    # until it actually reads the wanted act" tolerance enter_act already gives a call
+    # that silently did not take.
+    mod = ScriptedMod()
+    embark_run(mod, ascension=0)
+    real_post = ScriptedMod.post_action
+    calls = {"n": 0}
+
+    def flaky_post(self, action, **kwargs):
+        if action.get("action") == "debug_enter_next_act":
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise BridgeError("mod sent a non-JSON response (500 from /api/v1/singleplayer)")
+        return real_post(self, action, **kwargs)
+
+    mod.post_action = flaky_post.__get__(mod, ScriptedMod)
+
+    state = enter_act(mod, 2)
+
+    assert act_of(state) == 2
+    assert calls["n"] == 2  # 1 failed and was retried, 1 succeeded
+
+
+def test_enter_act_gives_up_after_max_attempts_of_persistent_bridge_errors():
+    mod = ScriptedMod()
+    embark_run(mod, ascension=0)
+
+    def always_raises(self, action, **kwargs):
+        if action.get("action") == "debug_enter_next_act":
+            raise BridgeError("mod is busy")
+        return ScriptedMod.post_action(self, action, **kwargs)
+
+    mod.post_action = always_raises.__get__(mod, ScriptedMod)
+
+    with pytest.raises(NavigatorError, match="stuck at 1"):
+        enter_act(mod, 2, max_attempts=3)
+
+
 def test_enter_act_no_run_raises():
     mod = ScriptedMod()
     with pytest.raises(NavigatorError):
@@ -174,12 +216,122 @@ def test_advance_one_step_card_reward_skips():
     assert {"action": "skip_card_reward"} in mod.posted
 
 
+def test_advance_one_step_rest_site_skips_a_disabled_option():
+    # Real capture shape (data/runs/20260926-220853.jsonl): options carry their own
+    # is_enabled (HEAL is disabled at full HP; SMITH stays enabled). Picking index 0
+    # unconditionally sends choose_rest_option at a disabled option, which the mod
+    # no-ops (McpMod.Actions.cs ExecuteChooseRestOption: "option ... is disabled"), so
+    # the rest site was left unused every time HP was already full.
+    mod = ScriptedMod()
+    mod.state_type = "rest_site"
+    mod.rest_site_options = [
+        {"index": 0, "id": "HEAL", "name": "Rest", "is_enabled": False, "has_button": True},
+        {"index": 1, "id": "SMITH", "name": "Smith", "is_enabled": True, "has_button": True},
+    ]
+    advance_one_step(mod, mod.get_state())
+    assert {"action": "choose_rest_option", "index": 1} in mod.posted
+    assert {"action": "proceed"} in mod.posted
+
+
+def test_advance_one_step_rest_site_prefers_the_first_enabled_option():
+    mod = ScriptedMod()
+    mod.state_type = "rest_site"
+    mod.rest_site_options = [
+        {"index": 0, "id": "HEAL", "name": "Rest", "is_enabled": True, "has_button": True},
+        {"index": 1, "id": "SMITH", "name": "Smith", "is_enabled": True, "has_button": True},
+    ]
+    advance_one_step(mod, mod.get_state())
+    assert {"action": "choose_rest_option", "index": 0} in mod.posted
+
+
+def test_advance_one_step_rest_site_with_nothing_enabled_still_proceeds():
+    mod = ScriptedMod()
+    mod.state_type = "rest_site"
+    mod.rest_site_options = [
+        {"index": 0, "id": "HEAL", "name": "Rest", "is_enabled": False, "has_button": True},
+    ]
+    advance_one_step(mod, mod.get_state())
+    assert not any(a.get("action") == "choose_rest_option" for a in mod.posted)
+    assert {"action": "proceed"} in mod.posted
+
+
+def test_advance_one_step_card_select_picks_the_first_card_and_confirms():
+    # Real capture (data/runs/20260928-190511.jsonl): a rest-site "Choose a card to
+    # Upgrade" grid, but the same state_type/schema also serves a shop's card removal,
+    # an event's card transform and Neow's transform-a-card bonus (task: "upgrade,
+    # remove and transform choices from rest sites, shops, events and Neow"). Before
+    # this fix, card_select fell into the same branch as card_reward and sent
+    # skip_card_reward -- an action the grid screen has no handler for (STS2MCP's
+    # skip_card_reward needs the post-combat reward screen, not the grid) -- which left
+    # it up forever. select_card + confirm_selection is the grid's own pair
+    # (McpMod.Actions.cs ExecuteSelectCard/ExecuteConfirmSelection).
+    mod = ScriptedMod()
+    mod.state_type = "card_select"
+    mod.card_select_cards = [
+        {"index": 0, "id": "STRIKE_IRONCLAD", "uid": "STRIKE_IRONCLAD#5"},
+        {"index": 1, "id": "STRIKE_IRONCLAD", "uid": "STRIKE_IRONCLAD#6"},
+    ]
+    advance_one_step(mod, mod.get_state())
+    assert {"action": "select_card", "index": 0} in mod.posted
+    assert {"action": "confirm_selection"} in mod.posted
+    assert not any(a.get("action") == "skip_card_reward" for a in mod.posted)
+
+
+def test_advance_one_step_card_select_with_no_cards_does_not_crash():
+    mod = ScriptedMod()
+    mod.state_type = "card_select"
+    mod.card_select_cards = []
+    advance_one_step(mod, mod.get_state())  # must not raise
+    assert not any(a.get("action") == "select_card" for a in mod.posted)
+
+
 def test_advance_one_step_treasure_claims_and_proceeds():
     mod = ScriptedMod()
     mod.state_type = "treasure"
     advance_one_step(mod, mod.get_state())
     assert {"action": "claim_treasure_relic", "index": 0} in mod.posted
     assert {"action": "proceed"} in mod.posted
+
+
+def test_advance_one_step_shop_leaves_without_buying():
+    # Task item 4 ("check the autopilot's handling of shop buys"): confirmed no
+    # shop.buy_* kind is mapped (coach.strategyplay), so every shop visit falls to
+    # this generic branch -- it must at least leave cleanly. ExecuteProceed's merchant
+    # branch (McpMod.Actions.cs) closes the inventory first if open, then leaves.
+    mod = ScriptedMod()
+    mod.state_type = "shop"
+    advance_one_step(mod, mod.get_state())
+    assert mod.posted == [{"action": "proceed"}]
+
+
+def test_advance_one_step_relic_select_picks_the_first_relic():
+    # Boss relics and any other "choose a relic" moment share this state_type
+    # (STS2MCP McpMod.StateBuilder.cs: NChooseARelicSelection -> "relic_select").
+    mod = ScriptedMod()
+    mod.state_type = "relic_select"
+    advance_one_step(mod, mod.get_state())
+    assert {"action": "select_relic", "index": 0} in mod.posted
+
+
+def test_advance_one_step_event_picks_the_first_option():
+    mod = ScriptedMod()
+    mod.state_type = "event"
+    mod.event_options = [{"index": 0, "title": "Leave"}, {"index": 1, "title": "Fight"}]
+    advance_one_step(mod, mod.get_state())
+    assert {"action": "choose_event_option", "index": 0} in mod.posted
+
+
+def test_advance_one_step_event_with_no_options_yet_does_not_crash():
+    # Real capture (data/runs/20260926-220853.jsonl): an event screen can settle with
+    # body null / options [] for one read while it is still opening (2 of 21 real event
+    # reads in that session). Nothing to act on yet; the next poll re-reads fresh, so
+    # this must stay a no-op rather than guess at an action the mod has no handler for
+    # on a bare event room (ExecuteProceed has no generic event-room case).
+    mod = ScriptedMod()
+    mod.state_type = "event"
+    mod.event_options = []
+    advance_one_step(mod, mod.get_state())  # must not raise
+    assert mod.posted == []
 
 
 def test_advance_one_step_game_over_returns_to_menu():
