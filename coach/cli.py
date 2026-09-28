@@ -25,7 +25,7 @@ from pathlib import Path
 
 import uvicorn
 
-from coach import dashboard, fidelity_scoreboard
+from coach import autopilot, dashboard, deckseed, fidelity_scoreboard, fightlab, navigator
 from coach.bridge.client import BridgeAuthError, BridgeError, ModClient
 from coach.bridge.versions import VersionStatus, check_versions, read_game_version
 from coach.capture import capture_loop
@@ -60,6 +60,12 @@ DEFAULT_MOD_REPO = Path.home() / "Documents" / "git" / "STS2MCP"
 MOD_ID = "STS2_MCP"
 DEFAULT_WORKERS = 4  # the engine service's search workers (spec 5.3)
 DEFAULT_BUDGET_S = 1.5  # seconds of search per position (spec 5.3, 7.3)
+DEFAULT_LAB_ACTS = (2, 3, 1)  # Act 2-3 first, then the rest
+DEFAULT_LAB_ASCENSION = 10
+DEFAULT_LAB_FIGHTS = 20
+DEFAULT_LAB_TIME_SCALE = 3.0  # the fight lab's default (spec: "raise the game's time scale")
+DEFAULT_AUTOPILOT_RUNS = 1
+DEFAULT_AUTOPILOT_BUFFER_HP = 0  # off by default (spec)
 
 _SERVER_START_S = 10.0  # uvicorn listens well within this
 _SERVER_STOP_S = 5.0
@@ -370,6 +376,137 @@ def cmd_fidelity_scoreboard(
     return 0
 
 
+# --- fight lab and autopilot -----------------------------------------------------
+
+
+def _read_fidelity_doc(data_dir: Path) -> dict | None:
+    path = data_dir / "fidelity" / fidelity_scoreboard.LATEST_NAME
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _set_time_scale(client: ModClient, time_scale: float) -> None:
+    try:
+        client.post_action({"action": "set_time_scale", "scale": time_scale})
+    except BridgeError as exc:
+        _say(f"could not raise the time scale to {time_scale}: {exc}", error=True)
+
+
+def cmd_fight_lab(
+    config: Config,
+    *,
+    fights: int = DEFAULT_LAB_FIGHTS,
+    time_scale: float = DEFAULT_LAB_TIME_SCALE,
+    acts: list[int] | None = None,
+    ascension: int = DEFAULT_LAB_ASCENSION,
+    workers: int = DEFAULT_WORKERS,
+    budget_s: float = DEFAULT_BUDGET_S,
+    client_factory: Callable[[str, str | None], ModClient] | None = None,
+    engine_factory: Callable[[], EngineClient] | None = None,
+) -> int:
+    """Play `fights` real fights unattended and record every move (see
+    coach.fightlab). Stops at the first unmet precondition, printing exactly what to
+    fix, same as `doctor`."""
+    acts = list(DEFAULT_LAB_ACTS) if acts is None else acts
+    client = (client_factory or ModClient)(config.base_url, config.token)
+    try:
+        problems = navigator.check_preconditions(client, config)
+        if problems:
+            for problem in problems:
+                _say(problem, error=True)
+            return 1
+        _set_time_scale(client, time_scale)
+        engine = (engine_factory or (lambda: EngineClient(workers=workers)))()
+        try:
+            problems = engine_health_problems(engine, timeout_s=config.engine_start_timeout_s)
+            if problems:
+                for problem in problems:
+                    _say(f"engine: {problem}", error=True)
+                return 1
+            runlog = RunLog(config.data_dir, subdir="runs", prefix="fightlab-")
+            _say(f"recording to {runlog.path}")
+            summary = fightlab.run(
+                client,
+                engine,
+                runlog,
+                fights=fights,
+                acts=acts,
+                ascension=ascension,
+                time_budget_s=budget_s,
+                game_version=read_game_version() or "unknown",
+                fidelity_doc=_read_fidelity_doc(config.data_dir),
+                shards_root=deckseed.DEFAULT_SHARDS_ROOT,
+                say=_say,
+            )
+            _say(summary.format())
+        finally:
+            engine.close()
+    finally:
+        client.close()
+    return 0
+
+
+def cmd_autopilot(
+    config: Config,
+    *,
+    runs: int = DEFAULT_AUTOPILOT_RUNS,
+    time_scale: float = DEFAULT_LAB_TIME_SCALE,
+    ascension: int = DEFAULT_LAB_ASCENSION,
+    buffer_hp: int = DEFAULT_AUTOPILOT_BUFFER_HP,
+    workers: int = DEFAULT_WORKERS,
+    budget_s: float = DEFAULT_BUDGET_S,
+    client_factory: Callable[[str, str | None], ModClient] | None = None,
+    engine_factory: Callable[[], EngineClient] | None = None,
+) -> int:
+    """Play `runs` whole real runs unattended, Ironclad at `ascension`, using the fight
+    lab's own move player and recording between real fights too (see coach.autopilot).
+    """
+    client = (client_factory or ModClient)(config.base_url, config.token)
+    try:
+        problems = navigator.check_preconditions(client, config)
+        if problems:
+            for problem in problems:
+                _say(problem, error=True)
+            return 1
+        _set_time_scale(client, time_scale)
+        engine = (
+            engine_factory
+            or (
+                lambda: EngineClient(
+                    workers=workers,
+                    extra_env={"STS2_STRATEGY_MODEL_DIR": str(autopilot.FULL_RUN_MODEL_DIR)},
+                )
+            )
+        )()
+        try:
+            problems = engine_health_problems(engine, timeout_s=config.engine_start_timeout_s)
+            if problems:
+                for problem in problems:
+                    _say(f"engine: {problem}", error=True)
+                return 1
+            runlog = RunLog(config.data_dir, subdir="runs", prefix="autopilot-")
+            _say(f"recording to {runlog.path}")
+            summary = autopilot.run(
+                client,
+                engine,
+                runlog,
+                runs=runs,
+                ascension=ascension,
+                buffer_hp=buffer_hp,
+                time_budget_s=budget_s,
+                game_version=read_game_version() or "unknown",
+                say=_say,
+            )
+            _say(summary.format())
+        finally:
+            engine.close()
+    finally:
+        client.close()
+    return 0
+
+
 class CoachError(Exception):
     """The live coach could not start. The message is one line for the user."""
 
@@ -664,6 +801,42 @@ def _port(text: str) -> int:
     return value
 
 
+def _fight_count(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a whole number") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be at least 1, got {text}")
+    return value
+
+
+def _ascension(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a whole number") from None
+    if not 0 <= value <= 20:
+        raise argparse.ArgumentTypeError(f"must be an ascension level from 0 to 20, got {text}")
+    return value
+
+
+def _acts(text: str) -> list[int]:
+    acts = []
+    for token in text.split(","):
+        token = token.strip()
+        try:
+            act = int(token)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"{token!r} is not a whole number") from None
+        if act not in (1, 2, 3):
+            raise argparse.ArgumentTypeError(f"act must be 1, 2 or 3, got {token}")
+        acts.append(act)
+    if not acts:
+        raise argparse.ArgumentTypeError("at least one act is required")
+    return acts
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="spire-coach")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -775,6 +948,88 @@ def _build_parser() -> argparse.ArgumentParser:
         help="resamples per check (default: the sts2 checkout's own default)",
     )
 
+    lab_parser = subparsers.add_parser(
+        "fight-lab",
+        help="play many real fights unattended and record every move, for the fidelity scoreboard",
+    )
+    lab_parser.add_argument(
+        "--fights",
+        type=_fight_count,
+        default=DEFAULT_LAB_FIGHTS,
+        help="how many fights to play before stopping (default: %(default)s)",
+    )
+    lab_parser.add_argument(
+        "--time-scale",
+        type=_seconds,
+        default=DEFAULT_LAB_TIME_SCALE,
+        help="the game's time scale while the lab runs (default: %(default)s)",
+    )
+    lab_parser.add_argument(
+        "--acts",
+        type=_acts,
+        default=list(DEFAULT_LAB_ACTS),
+        help="which acts to draw fights from, comma-separated (default: %(default)s)",
+    )
+    lab_parser.add_argument(
+        "--ascension",
+        type=_ascension,
+        default=DEFAULT_LAB_ASCENSION,
+        help="ascension level for every fight (default: %(default)s)",
+    )
+    lab_parser.add_argument(
+        "--workers",
+        type=_worker_count,
+        default=DEFAULT_WORKERS,
+        help="search worker processes of the engine service (default: %(default)s)",
+    )
+    lab_parser.add_argument(
+        "--budget",
+        type=_seconds,
+        default=DEFAULT_BUDGET_S,
+        help="seconds of search per position (default: %(default)s)",
+    )
+
+    autopilot_parser = subparsers.add_parser(
+        "autopilot",
+        help="play whole real runs unattended, with an optional HP safety buffer",
+    )
+    autopilot_parser.add_argument(
+        "--runs",
+        type=_fight_count,
+        default=DEFAULT_AUTOPILOT_RUNS,
+        help="how many runs to play before stopping (default: %(default)s)",
+    )
+    autopilot_parser.add_argument(
+        "--buffer-hp",
+        type=int,
+        default=DEFAULT_AUTOPILOT_BUFFER_HP,
+        help="extra current+max HP at the start of every fight, 0 = off (default: %(default)s)",
+    )
+    autopilot_parser.add_argument(
+        "--ascension",
+        type=_ascension,
+        default=DEFAULT_LAB_ASCENSION,
+        help="ascension level for every run (default: %(default)s)",
+    )
+    autopilot_parser.add_argument(
+        "--time-scale",
+        type=_seconds,
+        default=DEFAULT_LAB_TIME_SCALE,
+        help="the game's time scale while autopilot runs (default: %(default)s)",
+    )
+    autopilot_parser.add_argument(
+        "--workers",
+        type=_worker_count,
+        default=DEFAULT_WORKERS,
+        help="search worker processes of the engine service (default: %(default)s)",
+    )
+    autopilot_parser.add_argument(
+        "--budget",
+        type=_seconds,
+        default=DEFAULT_BUDGET_S,
+        help="seconds of search per position (default: %(default)s)",
+    )
+
     return parser
 
 
@@ -833,6 +1088,29 @@ def main(argv: list[str] | None = None) -> int:
                 out_dir=args.out_dir,
                 resamples=args.resamples,
             )
+        if args.command == "fight-lab":
+            return cmd_fight_lab(
+                config,
+                fights=args.fights,
+                time_scale=args.time_scale,
+                acts=args.acts,
+                ascension=args.ascension,
+                workers=args.workers,
+                budget_s=args.budget,
+            )
+        if args.command == "autopilot":
+            return cmd_autopilot(
+                config,
+                runs=args.runs,
+                time_scale=args.time_scale,
+                ascension=args.ascension,
+                buffer_hp=args.buffer_hp,
+                workers=args.workers,
+                budget_s=args.budget,
+            )
+    except navigator.NavigatorError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
     except BridgeAuthError as exc:
         print(str(exc), file=sys.stderr)
         return 2

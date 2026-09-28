@@ -246,15 +246,23 @@ class EngineClient:
         workers: int = 4,
         request_timeout_s: float = 10.0,
         on_restart: Callable[[], None] | None = None,
+        extra_env: dict[str, str] | None = None,
     ) -> None:
+        """`extra_env` is merged into the service's environment on top of the coach's
+        own (or, with a custom `cmd`, used as its whole environment): the autopilot
+        sets `STS2_STRATEGY_MODEL_DIR` this way to point the service at the full-run
+        champion, without the coach's own `coach` command (no `extra_env`) changing
+        which one it uses."""
         if cmd is None:
             self._cmd = _default_cmd(workers)
             self._cwd: Path | None = _STS2_DIR
             self._env: dict[str, str] | None = _default_env()
+            if extra_env:
+                self._env.update(extra_env)
         else:
             self._cmd = cmd
             self._cwd = None
-            self._env = None
+            self._env = dict(extra_env) if extra_env else None
         self.on_restart = on_restart
         self._request_timeout_s = request_timeout_s
         self._lock = threading.Lock()
