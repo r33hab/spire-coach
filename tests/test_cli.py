@@ -773,7 +773,14 @@ def test_config_value_error_at_the_boundary_is_one_line_and_exit_1(monkeypatch, 
 
 # --- coach: argument parsing ------------------------------------------------------------
 
-COACH_DEFAULTS = {"workers": 4, "budget_s": 1.5, "port": 15530, "window": True, "mode": "show"}
+COACH_DEFAULTS = {
+    "workers": 4,
+    "budget_s": 1.5,
+    "port": 15530,
+    "window": True,
+    "mode": "show",
+    "prior": None,
+}
 
 
 def record_coach_calls(monkeypatch, tmp_path):
@@ -795,10 +802,79 @@ def test_coach_dispatches_with_every_option_given(monkeypatch, tmp_path):
     config, calls = record_coach_calls(monkeypatch, tmp_path)
     argv = ["coach", "--workers", "6", "--budget", "2.5", "--port", "15600"]
 
-    assert cli.main([*argv, "--no-window", "--mode", "quiz"]) == 0
+    assert cli.main([*argv, "--no-window", "--mode", "quiz", "--no-prior"]) == 0
     assert calls == [
-        (config, {"workers": 6, "budget_s": 2.5, "port": 15600, "window": False, "mode": "quiz"})
+        (
+            config,
+            {
+                "workers": 6,
+                "budget_s": 2.5,
+                "port": 15600,
+                "window": False,
+                "mode": "quiz",
+                "prior": False,
+            },
+        )
     ]
+
+
+def test_coach_passes_prior_through(monkeypatch, tmp_path):
+    config, calls = record_coach_calls(monkeypatch, tmp_path)
+
+    assert cli.main(["coach", "--prior"]) == 0
+    assert calls == [(config, {**COACH_DEFAULTS, "prior": True})]
+
+
+def export_prior(config):
+    folder = cli.combat_prior_dir(config)
+    folder.mkdir(parents=True)
+    (folder / "model.json").write_text("{}", encoding="utf-8")
+    (folder / "combat_policy.pt").write_bytes(b"weights")
+    return folder
+
+
+def test_the_prior_is_on_by_default_only_when_one_is_exported(tmp_path):
+    config = make_config(tmp_path)
+    assert cli.combat_prior_dir(config) == tmp_path / "data" / "models" / "combat_prior"
+    assert cli._prior_dir(config, None) is None  # nothing exported: the plain search
+    assert cli._prior_dir(config, False) is None
+    folder = export_prior(config)
+    assert cli._prior_dir(config, None) == folder
+    assert cli._prior_dir(config, True) == folder
+    assert cli._prior_dir(config, False) is None  # --no-prior
+
+
+def test_prior_without_an_exported_prior_is_refused(tmp_path):
+    config = make_config(tmp_path)
+    with pytest.raises(cli.CoachError, match="no combat prior is exported to"):
+        cli._prior_dir(config, True)
+
+
+def test_the_default_can_be_off_even_with_a_prior_exported(monkeypatch, tmp_path):
+    config = make_config(tmp_path)
+    folder = export_prior(config)
+    monkeypatch.setattr(cli, "DEFAULT_PRIOR", False)
+    assert cli._prior_dir(config, None) is None
+    assert cli._prior_dir(config, True) == folder
+
+
+def test_the_coach_starts_the_engine_with_the_exported_prior(monkeypatch, tmp_path, capsys):
+    config = make_config(tmp_path)
+    folder = export_prior(config)
+    made = []
+
+    class Stop(Exception):
+        pass
+
+    def engine(cmd=None, **kwargs):
+        made.append(kwargs)
+        raise Stop
+
+    monkeypatch.setattr(cli, "EngineClient", engine)
+    for prior in (None, False):
+        with pytest.raises(Stop):
+            cli.cmd_coach(config, prior=prior, client_factory=lambda url, token: FakeMod())
+    assert [kwargs["prior_dir"] for kwargs in made] == [folder, None]
 
 
 @pytest.mark.parametrize(
@@ -1041,8 +1117,8 @@ class CoachRun:
                 stops.append("session closed")
                 return ended
 
-        def engine(cmd, *, workers):
-            client = make_engine(cmd, workers=workers)
+        def engine(cmd, *, workers, **kwargs):
+            client = make_engine(cmd, workers=workers, **kwargs)
             close = client.close
 
             def closed():
@@ -1176,7 +1252,7 @@ def test_the_options_reach_the_engine_service_and_the_session(tmp_path, monkeypa
     run = CoachRun(tmp_path)
     launched = []
 
-    def engine_client(cmd, *, workers):
+    def engine_client(cmd, *, workers, prior_dir=None):
         launched.append((cmd, workers))
         return EngineClient(run.engine_cmd, workers=workers)  # the fake, not the simulator
 
@@ -1231,7 +1307,9 @@ def test_a_port_already_taken_is_one_line_on_stderr_and_leaves_nothing_running(
     monkeypatch.setattr(cli, "load_config", lambda: run.config)
     monkeypatch.setattr(cli, "ModClient", lambda base_url, token: run.mod)
     monkeypatch.setattr(
-        cli, "EngineClient", lambda cmd, *, workers: EngineClient(run.engine_cmd, workers=workers)
+        cli,
+        "EngineClient",
+        lambda cmd, *, workers, prior_dir=None: EngineClient(run.engine_cmd, workers=workers),
     )
     # Noticed when the server gives up, not when the deadline for it to listen runs out.
     monkeypatch.setattr(cli, "_SERVER_START_S", UNDER_LOAD_S)
@@ -1261,7 +1339,9 @@ def test_the_first_health_check_waits_for_a_slow_engine_start(tmp_path, monkeypa
     monkeypatch.setattr(
         cli,
         "EngineClient",
-        lambda cmd, *, workers: EngineClient(cmd, workers=workers, request_timeout_s=0.3),
+        lambda cmd, *, workers, prior_dir=None: EngineClient(
+            cmd, workers=workers, request_timeout_s=0.3
+        ),
     )
     waited = []
 
@@ -1344,8 +1424,8 @@ def test_a_terminal_gone_away_does_not_keep_the_coach_from_stopping_all(tmp_path
 def test_a_step_of_stopping_that_fails_does_not_skip_the_steps_after_it(tmp_path, monkeypatch):
     run = CoachRun(tmp_path)
 
-    def engine_client(cmd, *, workers):
-        engine = EngineClient(cmd, workers=workers)
+    def engine_client(cmd, *, workers, prior_dir=None):
+        engine = EngineClient(cmd, workers=workers, prior_dir=prior_dir)
         close = engine.close
 
         def failing_close():
