@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 from fakes.fake_mod import ScriptedMod
 
-from coach import fightlab
+from coach import autoplay, fightlab
 from coach.autoplay import FightOutcome
 from coach.bridge.client import BridgeError
 from coach.deckseed import SampledCard
@@ -194,6 +194,28 @@ def test_run_recovers_from_a_bridge_error_and_counts_a_failure(tmp_path):
     assert summary.failures == 1
     lines = runlog.path.read_text(encoding="utf-8").splitlines()
     assert any(json.loads(line)["kind"] == "error" for line in lines)
+
+
+def test_run_recovers_from_a_game_jam_instead_of_crashing(tmp_path):
+    # Bug 3/7: MovePlayer.play_fight now raises GameJamError on a stuck game, which
+    # fight-lab shares the move player class with -- it must count this the same way
+    # as any other per-fight failure (recover, move on) rather than letting a new
+    # exception type it never used to see crash the whole lab run.
+    mod = make_mod()
+
+    class JammedPlayer:
+        def __init__(self) -> None:
+            self.stats = SimpleNamespace(moves=0)
+
+        def play_fight(self, state, **kwargs):
+            raise autoplay.GameJamError("jam: is_resolving stuck true with no state change")
+
+    summary, runlog = run_lab(mod, JammedPlayer(), tmp_path, fights=1)
+
+    assert summary.fights_played == 0
+    assert summary.failures == 1
+    lines = [json.loads(line) for line in runlog.path.read_text(encoding="utf-8").splitlines()]
+    assert any(line["kind"] == "error" and "jam" in line["payload"]["error"].lower() for line in lines)
 
 
 def test_run_stages_a_sampled_deck_when_one_is_found(tmp_path, monkeypatch):

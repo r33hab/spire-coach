@@ -143,7 +143,7 @@ def run(
                     shards_root=shards_root,
                     runlog=runlog,
                 )
-            except (BridgeError, navigator.NavigatorError) as exc:
+            except (BridgeError, navigator.NavigatorError, autoplay.GameJamError) as exc:
                 say(f"  could not play this fight ({exc}); recovering")
                 runlog.append(
                     "error", {"error": f"fightlab: {exc}", "encounter": encounter.name}

@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import copy
 import json
+import time
 from pathlib import Path
 
 import pytest
 
-from coach.autoplay import MovePlayer, in_combat, move_to_action, wait_settled
+from coach.autoplay import GameJamError, MovePlayer, in_combat, move_to_action, wait_settled
 from coach.engine import Analysis, CheckResult, EngineError, Move
 from coach.runlog import RunLog
 
@@ -628,6 +629,77 @@ def test_wait_settled_returns_last_state_on_timeout():
 
     state = wait_settled(NeverSettles(), timeout_s=0.05, poll_s=0.01)
     assert state["state_type"] == "monster"
+
+
+# --- game jam detection (bug 3/7) ---------------------------------------------------
+
+
+def _stuck_state():
+    state = combat_round(1, 50)
+    state["is_resolving"] = True  # confirmed live: stuck true, no state change at all
+    return state
+
+
+def test_play_fight_raises_game_jam_error_once_stuck_past_the_timeout(tmp_path, monkeypatch):
+    # Confirmed live twice tonight (Ovicopter, and again later the same session):
+    # is_resolving stayed true, the play phase reported true, cards marked can_play,
+    # and the game ignored all input, even a manual click -- only a full restart
+    # cleared it. The autopilot must detect this instead of retrying the same move
+    # forever (which is what it did: the real logs show two "safety buffer failed"
+    # errors about a minute apart, one per outer retry, never actually recovering).
+    bridge = ScriptedBridge([_stuck_state()])
+    engine = ScriptedEngine([END_TURN])
+    runlog = RunLog(tmp_path, subdir="runs", prefix="test-")
+    player = MovePlayer(
+        bridge, engine, runlog, game_version="v0.107.1", jam_timeout_s=60.0, settle_timeout_s=1.0
+    )
+    clock = {"t": 1000.0}
+
+    def fake_monotonic():
+        clock["t"] += 10.0
+        return clock["t"]
+
+    monkeypatch.setattr(time, "monotonic", fake_monotonic)
+
+    outcome = player.play_fight(bridge.get_state())
+    assert outcome.ok is False  # first attempt: stuck, but not yet timed out
+
+    with pytest.raises(GameJamError, match="60"):
+        for _ in range(20):  # the outer autopilot loop retrying play_fight
+            player.play_fight(bridge.get_state())
+
+    error_records = [r for r in records(runlog) if r["kind"] == "error"]
+    assert any("jam" in r["payload"]["error"] for r in error_records)
+
+
+def test_play_fight_does_not_raise_a_jam_while_the_position_keeps_changing(tmp_path, monkeypatch):
+    # A slow but genuinely progressing transition (a long enemy-turn animation, say)
+    # must not be mistaken for a jam: a changing fingerprint resets the clock.
+    states = [combat_round(r, 50, seq=r) for r in range(1, 6)]
+    for state in states:
+        state["is_resolving"] = True
+    bridge = ScriptedBridge(states)
+    engine = ScriptedEngine([END_TURN])
+    runlog = RunLog(tmp_path, subdir="runs", prefix="test-")
+    player = MovePlayer(
+        bridge, engine, runlog, game_version="v0.107.1", jam_timeout_s=60.0, settle_timeout_s=1.0
+    )
+    clock = {"t": 1000.0}
+
+    def fake_monotonic():
+        clock["t"] += 10.0
+        return clock["t"]
+
+    monkeypatch.setattr(time, "monotonic", fake_monotonic)
+
+    for i in range(len(states)):
+        outcome = player.play_fight(bridge.get_state())
+        assert outcome.ok is False
+        bridge._index = min(i + 1, len(states) - 1)  # advance to the next distinct state
+
+    # No jam ever logged; RunLog creates its file lazily, on the first append, so no
+    # error at all means the file was never written.
+    assert not runlog.path.exists()
 
 
 @pytest.fixture(autouse=True)

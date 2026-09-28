@@ -23,12 +23,13 @@ already existed in the installed mod, so autopilot needed no mod change for this
 
 from __future__ import annotations
 
+import subprocess
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from coach import autoplay, navigator, strategyplay
+from coach import autoplay, navigator, saves, strategyplay
 from coach.autoplay import MovePlayer
 from coach.bridge.client import BridgeError, ModClient
 from coach.bridge.live_run import LiveRunTracker
@@ -41,6 +42,65 @@ FULL_RUN_MODEL_DIR = (
 )
 _STEP_TIMEOUT_S = 20.0
 _MAX_SCREENS_PER_RUN = 4000  # stuck-safety cap (spec: "a timeout, then recovery")
+
+# --- --restart-on-jam: quit, relaunch, and let the next run's own embark_run abandon
+# the jammed one from the main menu (bug 3/7) ----------------------------------------
+_STEAM_APP_ID = "2868840"
+# Same pattern coach.saves.game_is_running already checks for.
+_GAME_PROCESS_PATTERN = "SlayTheSpire2.app/Contents/MacOS"
+_GAME_QUIT_TIMEOUT_S = 30.0
+_GAME_HELLO_TIMEOUT_S = 90.0  # a cold Steam launch can take a while (README)
+
+
+def _quit_game(*, timeout_s: float = _GAME_QUIT_TIMEOUT_S, poll_s: float = 1.0) -> None:
+    """Force-quit the jammed game process: the jam leaves it deaf to a graceful
+    `return_to_main_menu` (spec, and tonight's own recoveries -- a restart was the
+    only thing that ever cleared it), so this is the same last resort a person at the
+    keyboard used tonight, automated."""
+    subprocess.run(["pkill", "-f", _GAME_PROCESS_PATTERN], check=False)
+    deadline = time.monotonic() + timeout_s
+    while saves.game_is_running() and time.monotonic() < deadline:
+        time.sleep(poll_s)
+
+
+def _launch_game() -> None:
+    subprocess.run(["open", f"steam://rungameid/{_STEAM_APP_ID}"], check=False)
+
+
+def _await_hello(client: ModClient, *, timeout_s: float, poll_s: float = 2.0) -> None:
+    """Wait for the mod's `hello` to answer after a relaunch -- the root URL is only a
+    health check (STS2MCP), so this is the same thing a person watching the terminal
+    would do before trying anything else."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        try:
+            client.hello()
+            return
+        except BridgeError:
+            if time.monotonic() > deadline:
+                raise
+            time.sleep(poll_s)
+
+
+def _restart_after_jam(
+    client: ModClient,
+    *,
+    say: Callable[[str], None],
+    quit_game: Callable[[], None],
+    launch_game: Callable[[], None],
+    hello_timeout_s: float = _GAME_HELLO_TIMEOUT_S,
+) -> None:
+    """Clear a jam the only way confirmed to work: quit the frozen game process and
+    relaunch it. Abandoning the jammed run itself needs no extra step here -- the next
+    `for` iteration's own `_play_run` calls `embark_run`, whose first move is already
+    `_abandon_any_run_in_progress` from the main menu, exactly what the spec asks for.
+    """
+    say("  quitting the game")
+    quit_game()
+    say("  relaunching the game")
+    launch_game()
+    _await_hello(client, timeout_s=hello_timeout_s)
+    say("  the mod answered; continuing")
 
 
 @dataclass
@@ -92,9 +152,21 @@ def run(
     stop: Callable[[], bool] = lambda: False,
     say: Callable[[str], None] = lambda _message: None,
     move_player: MovePlayer | None = None,
+    restart_on_jam: bool = False,
+    quit_game: Callable[[], None] = _quit_game,
+    launch_game: Callable[[], None] = _launch_game,
+    restart_hello_timeout_s: float = _GAME_HELLO_TIMEOUT_S,
 ) -> AutopilotSummary:
     """Play whole runs until `runs` is reached or `stop()` says otherwise. `move_player`
-    is a seam for tests, as in `coach.fightlab.run`."""
+    is a seam for tests, as in `coach.fightlab.run`.
+
+    On a game jam (`coach.autoplay.GameJamError`: `is_resolving` stuck true with no
+    state change for about a minute, the game ignoring all input -- spec), the default
+    is to stop the whole autopilot with a clear message, since only a game restart is
+    known to clear it and doing that unasked would be a surprising thing for an
+    unattended process to do on its own. `restart_on_jam=True` does it anyway: quits
+    the game, relaunches it, and continues with the next run once the mod answers
+    again."""
     player = move_player or MovePlayer(
         client,
         engine,
@@ -141,6 +213,31 @@ def run(
                     stop=stop,
                     resume_state=resume_state,
                 )
+            except autoplay.GameJamError as exc:
+                resume_state = None
+                runlog.append("error", {"error": f"autopilot: {exc}"})
+                if not restart_on_jam:
+                    say(
+                        f"  game jam detected ({exc}); stopping autopilot -- pass "
+                        "--restart-on-jam to recover automatically next time"
+                    )
+                    break
+                say(f"  game jam detected ({exc}); restarting the game")
+                try:
+                    _restart_after_jam(
+                        client,
+                        say=say,
+                        quit_game=quit_game,
+                        launch_game=launch_game,
+                        hello_timeout_s=restart_hello_timeout_s,
+                    )
+                except BridgeError as restart_exc:
+                    runlog.append(
+                        "error", {"error": f"autopilot: restart-on-jam failed: {restart_exc}"}
+                    )
+                    say(f"  could not recover from the jam ({restart_exc}); stopping autopilot")
+                    break
+                continue
             except (BridgeError, navigator.NavigatorError) as exc:
                 resume_state = None
                 say(f"  run failed ({exc}); recovering")

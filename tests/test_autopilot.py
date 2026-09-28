@@ -12,7 +12,8 @@ import pytest
 from fakes.fake_mod import ScriptedMod
 
 from coach import autopilot
-from coach.autoplay import FightOutcome
+from coach.autoplay import FightOutcome, GameJamError
+from coach.bridge.client import BridgeError
 from coach.engine import EngineError, StrategyResult
 from coach.runlog import RunLog
 
@@ -285,6 +286,95 @@ def test_session_header_names_the_autopilot_command_and_settings(tmp_path):
     assert first["payload"]["command"] == "autopilot"
     assert first["payload"]["ascension"] == 15
     assert first["payload"]["buffer_hp"] == 10
+
+
+class JammingThenNormalPlayer:
+    """Raises GameJamError on its first `jam_count` calls to play_fight, then behaves
+    like ScriptedFightPlayer (delegated to) for the rest."""
+
+    def __init__(self, mod, script, *, jam_count=1):
+        self._delegate = ScriptedFightPlayer(mod, script)
+        self._jam_count = jam_count
+        self._calls = 0
+        self.stats = self._delegate.stats
+
+    def play_fight(self, state, **kwargs):
+        self._calls += 1
+        if self._calls <= self._jam_count:
+            raise GameJamError("jam: is_resolving stuck true with no state change")
+        return self._delegate.play_fight(state, **kwargs)
+
+
+def test_run_stops_on_a_game_jam_by_default(tmp_path):
+    # Spec: by default, stop the autopilot with a clear message -- not silently loop
+    # retrying the same move forever, and not restart the game unasked.
+    mod = make_mod()
+    mod.after_map_choice = "monster"
+    player = JammingThenNormalPlayer(mod, [(death(), 1)], jam_count=1)
+    engine = StubEngine()
+    runlog = RunLog(tmp_path, subdir="runs", prefix="autopilot-")
+    said = []
+
+    summary = autopilot.run(mod, engine, runlog, runs=3, move_player=player, say=said.append)
+
+    assert summary.runs_played == 0
+    assert any("jam" in line.lower() for line in said)
+    assert any("stopping" in line.lower() for line in said)
+    error_lines = [
+        json.loads(line)
+        for line in runlog.path.read_text(encoding="utf-8").splitlines()
+        if json.loads(line)["kind"] == "error"
+    ]
+    assert any("jam" in line["payload"]["error"].lower() for line in error_lines)
+
+
+def test_run_restarts_on_jam_when_opted_in(tmp_path):
+    mod = make_mod()
+    mod.after_map_choice = "monster"
+    player = JammingThenNormalPlayer(mod, [(death(), 1)], jam_count=1)
+    engine = StubEngine()
+    runlog = RunLog(tmp_path, subdir="runs", prefix="autopilot-")
+    calls = {"quit": 0, "launch": 0}
+
+    summary = autopilot.run(
+        mod,
+        engine,
+        runlog,
+        runs=2,  # the jam consumes one attempt (as any other recovered failure does)
+        move_player=player,
+        restart_on_jam=True,
+        quit_game=lambda: calls.__setitem__("quit", calls["quit"] + 1),
+        launch_game=lambda: calls.__setitem__("launch", calls["launch"] + 1),
+    )
+
+    assert calls == {"quit": 1, "launch": 1}
+    assert summary.runs_played == 1  # continued with the next run and completed it
+
+
+def test_run_restart_on_jam_gives_up_if_the_mod_never_answers_again(tmp_path):
+    mod = make_mod()
+    mod.hello_ok = False  # the "relaunch" never actually comes back up
+    mod.after_map_choice = "monster"
+    player = JammingThenNormalPlayer(mod, [(death(), 1)], jam_count=1)
+    engine = StubEngine()
+    runlog = RunLog(tmp_path, subdir="runs", prefix="autopilot-")
+    said = []
+
+    summary = autopilot.run(
+        mod,
+        engine,
+        runlog,
+        runs=2,
+        move_player=player,
+        say=said.append,
+        restart_on_jam=True,
+        quit_game=lambda: None,
+        launch_game=lambda: None,
+        restart_hello_timeout_s=0.05,
+    )
+
+    assert summary.runs_played == 0
+    assert any("could not recover" in line.lower() for line in said)
 
 
 def test_stuck_run_is_recovered_not_crashed(tmp_path, monkeypatch):

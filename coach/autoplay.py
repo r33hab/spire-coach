@@ -50,6 +50,23 @@ DEFAULT_MAX_MOVES = 300  # a stuck-safety cap, not a real turn limit ("a timeout
 # specific cards are played; Aeonglass/Entomancer flood the hand instead of dealing
 # damage) rather than burning the full 300-move cap every single attempt.
 DEFAULT_NO_PROGRESS_ROUNDS = 15
+# Bug 3/7: confirmed live twice tonight (Ovicopter and, in this same session, a second
+# fight) -- is_resolving stuck true, the play phase reported true, cards marked
+# can_play, yet the game refused all input, even a manual click; only a full game
+# restart cleared it. "About 60s" per spec: generous next to a real settle
+# (DEFAULT_SETTLE_TIMEOUT_S=20s covers an ordinary slow turn already), short enough
+# that the autopilot does not sit for minutes on something a human would recognize
+# as dead within a few seconds of watching it.
+DEFAULT_JAM_TIMEOUT_S = 60.0
+
+
+class GameJamError(Exception):
+    """`is_resolving` stayed true with no change in position for about
+    `DEFAULT_JAM_TIMEOUT_S` seconds: the game has stopped responding to all input.
+    Never recovered by waiting longer or retrying the same move (spec, and tonight's
+    own experience) -- only a game restart is known to clear it. By default this stops
+    the autopilot with a clear message (`coach.autopilot.run`); `--restart-on-jam`
+    handles it instead."""
 
 
 def in_combat(state: dict) -> bool:
@@ -239,6 +256,7 @@ class MovePlayer:
         poll_s: float = DEFAULT_POLL_S,
         source: str = "fightlab",
         no_progress_rounds: int = DEFAULT_NO_PROGRESS_ROUNDS,
+        jam_timeout_s: float = DEFAULT_JAM_TIMEOUT_S,
     ) -> None:
         self._client = client
         self._engine = engine
@@ -249,6 +267,9 @@ class MovePlayer:
         self._poll_s = poll_s
         self._source = source
         self._no_progress_rounds = no_progress_rounds
+        self._jam_timeout_s = jam_timeout_s
+        self._jam_fingerprint: str | None = None
+        self._jam_stuck_since: float = 0.0
         self._last_room_type: str | None = None
         self.stats = PlayStats()
 
@@ -276,7 +297,21 @@ class MovePlayer:
                     self._client, timeout_s=self._settle_timeout_s, poll_s=self._poll_s
                 )
                 if not is_settled(settled) and in_combat(settled):
+                    current_fp = fingerprint(settled)
+                    if current_fp != self._jam_fingerprint:
+                        self._jam_fingerprint = current_fp
+                        self._jam_stuck_since = time.monotonic()
+                    elif time.monotonic() - self._jam_stuck_since >= self._jam_timeout_s:
+                        message = (
+                            "jam: is_resolving has stayed true with no state change "
+                            f"for about {self._jam_timeout_s:.0f}s -- the game is not "
+                            "responding to input (confirmed live: only a game restart "
+                            "clears this)"
+                        )
+                        self._runlog.append("error", {"error": message})
+                        raise GameJamError(message)
                     return FightOutcome(state=settled, ok=False, last_hp=last_hp)
+                self._jam_fingerprint = None
                 state = settled
                 continue
             decision = classify(state)
