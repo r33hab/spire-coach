@@ -15,12 +15,15 @@ from coach.navigator import (
     NavigatorError,
     act_of,
     advance_one_step,
+    apply_hp_buffer,
     check_preconditions,
     embark_run,
     enter_act,
     hp_of,
     leave_run,
+    max_hp_of,
 )
+from coach.runlog import RunLog
 
 
 @pytest.fixture(autouse=True)
@@ -177,6 +180,103 @@ def test_hp_of_and_act_of_read_the_fields():
     assert hp_of({}) is None
     assert act_of({"run": {"act": 2}}) == 2
     assert act_of({}) is None
+
+
+def test_max_hp_of_reads_the_field():
+    assert max_hp_of({"player": {"max_hp": 80}}) == 80
+    assert max_hp_of({}) is None
+
+
+# --- HP safety buffer (bug 2/7: --buffer-hp stacked, reaching 110,080) ---------------
+
+
+def test_apply_hp_buffer_tops_up_to_the_target_when_below_it(tmp_path):
+    mod = ScriptedMod()
+    runlog = RunLog(tmp_path, subdir="runs", prefix="test-")
+
+    apply_hp_buffer(mod, runlog, 500, 80, source="autopilot")
+
+    assert mod.posted == [{"action": "debug_gain_max_hp", "amount": 420}]
+    lines = [json.loads(line) for line in runlog.path.read_text(encoding="utf-8").splitlines()]
+    assert lines[-1]["kind"] == "buffer"
+    assert lines[-1]["payload"] == {"target_hp": 500, "delta": 420}
+
+
+def test_apply_hp_buffer_never_grows_past_the_target_once_reached(tmp_path):
+    # The bug: --buffer-hp H used to ADD H every fight (reached 110,080 with H=10000
+    # over repeated fights). Once max HP already meets the target, nothing is sent.
+    mod = ScriptedMod()
+    runlog = RunLog(tmp_path, subdir="runs", prefix="test-")
+
+    apply_hp_buffer(mod, runlog, 500, 500, source="autopilot")
+
+    assert mod.posted == []
+    # Nothing sent means nothing logged either: RunLog creates its file lazily, on
+    # the first append, so no call at all means the file was never written.
+    assert not runlog.path.exists()
+
+
+def test_apply_hp_buffer_does_nothing_once_max_hp_already_exceeds_the_target(tmp_path):
+    mod = ScriptedMod()
+    runlog = RunLog(tmp_path, subdir="runs", prefix="test-")
+
+    apply_hp_buffer(mod, runlog, 100, 500, source="autopilot")
+
+    assert mod.posted == []
+
+
+def test_apply_hp_buffer_across_repeated_fights_settles_at_the_target(tmp_path):
+    # The real stacking scenario end to end (bug 2/7): buffering is applied at the
+    # start of several fights in a row, each time passed the max HP the previous
+    # fight actually left behind -- it must reach the target once and then stay
+    # there, not keep climbing (old behaviour with H=10000: 80 -> 10080 -> 20080 ->
+    # ... -> 110,080 over 11 fights).
+    mod = ScriptedMod()
+    runlog = RunLog(tmp_path, subdir="runs", prefix="test-")
+
+    apply_hp_buffer(mod, runlog, 500, 80, source="autopilot")  # fight 1: 80 -> 500
+    apply_hp_buffer(mod, runlog, 500, 500, source="autopilot")  # fight 2: already 500
+    apply_hp_buffer(mod, runlog, 500, 500, source="autopilot")  # fight 3: already 500
+
+    assert mod.posted == [{"action": "debug_gain_max_hp", "amount": 420}]
+
+
+def test_apply_hp_buffer_treats_a_missing_max_hp_as_zero(tmp_path):
+    mod = ScriptedMod()
+    runlog = RunLog(tmp_path, subdir="runs", prefix="test-")
+
+    apply_hp_buffer(mod, runlog, 50, None, source="autopilot")
+
+    assert mod.posted == [{"action": "debug_gain_max_hp", "amount": 50}]
+
+
+def test_apply_hp_buffer_logs_a_clear_error_and_does_not_raise_on_a_bridge_error(tmp_path):
+    class RaisingMod(ScriptedMod):
+        def post_action(self, action, **kwargs):
+            raise BridgeError("mod is busy")
+
+    mod = RaisingMod()
+    runlog = RunLog(tmp_path, subdir="runs", prefix="test-")
+
+    apply_hp_buffer(mod, runlog, 500, 80, source="autopilot")  # must not raise
+
+    lines = [json.loads(line) for line in runlog.path.read_text(encoding="utf-8").splitlines()]
+    assert any(
+        line["kind"] == "error" and "safety buffer failed" in line["payload"]["error"]
+        for line in lines
+    )
+
+
+def test_apply_hp_buffer_includes_extra_log_fields(tmp_path):
+    mod = ScriptedMod()
+    runlog = RunLog(tmp_path, subdir="runs", prefix="test-")
+
+    apply_hp_buffer(
+        mod, runlog, 500, 80, source="fightlab", log_extra={"encounter": "KaiserCrabBoss"}
+    )
+
+    lines = [json.loads(line) for line in runlog.path.read_text(encoding="utf-8").splitlines()]
+    assert lines[-1]["payload"] == {"target_hp": 500, "delta": 420, "encounter": "KaiserCrabBoss"}
 
 
 # --- generic fallback ----------------------------------------------------------------

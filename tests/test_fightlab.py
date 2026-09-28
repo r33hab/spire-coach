@@ -122,6 +122,8 @@ def test_run_advances_to_the_right_act_before_the_encounter(tmp_path, monkeypatc
 
 
 def test_buffer_hp_applies_to_a_boss_fight_only(tmp_path, monkeypatch):
+    # ScriptedMod's default max_hp is 80 (fake_mod.py), so a target of 500 tops up by
+    # 420 -- debug_gain_max_hp's own "amount" is a delta (bug 2/7), not the target.
     mod = make_mod()
     player = StubPlayer([_Scripted(won())])
     forced = [Encounter("KaiserCrabBoss", 2, "Hive", "boss")]
@@ -129,9 +131,37 @@ def test_buffer_hp_applies_to_a_boss_fight_only(tmp_path, monkeypatch):
 
     _, runlog = run_lab(mod, player, tmp_path, fights=1, buffer_hp=500)
 
-    assert {"action": "debug_gain_max_hp", "amount": 500} in mod.posted
+    assert {"action": "debug_gain_max_hp", "amount": 420} in mod.posted
     lines = [json.loads(line) for line in runlog.path.read_text(encoding="utf-8").splitlines()]
-    assert any(line["kind"] == "buffer" and line["payload"]["amount"] == 500 for line in lines)
+    assert any(
+        line["kind"] == "buffer" and line["payload"]["target_hp"] == 500 for line in lines
+    )
+
+
+def test_buffer_hp_does_not_stack_across_repeated_boss_fights(tmp_path, monkeypatch):
+    # Bug 2/7: --buffer-hp H used to ADD H every fight (reached 110,080 with
+    # H=10000). A fake mod that applies the delta like the real one does (current
+    # AND max HP both raised): a second boss fight must send nothing further, since
+    # max_hp already meets the target the first fight reached.
+    class BufferTrackingMod(ScriptedMod):
+        def post_action(self, action, **kwargs):
+            result = super().post_action(action, **kwargs)
+            if action.get("action") == "debug_gain_max_hp":
+                self.max_hp += action["amount"]
+                self.hp += action["amount"]
+            return result
+
+    mod = BufferTrackingMod(current_profile_id=2)
+    mod.encounter_tiers = {e.name: e.tier for e in ENCOUNTERS}
+    player = StubPlayer([_Scripted(won()), _Scripted(won())])
+    forced = [Encounter("KaiserCrabBoss", 2, "Hive", "boss")]
+    monkeypatch.setattr(fightlab, "rank_encounters", lambda *a, **k: forced)
+
+    run_lab(mod, player, tmp_path, fights=2, buffer_hp=500)
+
+    buffer_actions = [a for a in mod.posted if a.get("action") == "debug_gain_max_hp"]
+    assert buffer_actions == [{"action": "debug_gain_max_hp", "amount": 420}]
+    assert mod.max_hp == 500
 
 
 def test_buffer_hp_does_not_apply_to_a_plain_monster(tmp_path, monkeypatch):

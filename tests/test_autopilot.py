@@ -147,21 +147,52 @@ def test_run_falls_back_when_the_engine_has_no_model(tmp_path):
 
 
 def test_buffer_hp_applies_debug_gain_max_hp_before_each_fight_and_logs_it(tmp_path):
+    # ScriptedMod's default max_hp is 80 (fake_mod.py), so a target of 500 tops up by
+    # 420 -- debug_gain_max_hp's own "amount" is a delta (bug 2/7), not the target.
     mod = make_mod()
     mod.after_map_choice = "monster"
     player = ScriptedFightPlayer(mod, [(death(), 1)])
     engine = StubEngine()
     runlog = RunLog(tmp_path, subdir="runs", prefix="autopilot-")
 
-    autopilot.run(mod, engine, runlog, runs=1, buffer_hp=25, move_player=player)
+    autopilot.run(mod, engine, runlog, runs=1, buffer_hp=500, move_player=player)
 
-    assert {"action": "debug_gain_max_hp", "amount": 25} in mod.posted
+    assert {"action": "debug_gain_max_hp", "amount": 420} in mod.posted
     buffer_records = [
         json.loads(line)
         for line in runlog.path.read_text(encoding="utf-8").splitlines()
         if json.loads(line)["kind"] == "buffer"
     ]
-    assert buffer_records and buffer_records[0]["payload"]["amount"] == 25
+    assert buffer_records and buffer_records[0]["payload"] == {"target_hp": 500, "delta": 420}
+
+
+def test_buffer_hp_does_not_stack_across_repeated_fights(tmp_path):
+    # The bug: --buffer-hp H added H at the start of EVERY fight (reached 110,080
+    # with H=10000 over repeated fights). Three fights in one run, with a fake mod
+    # that applies debug_gain_max_hp's delta the way the real one does (current AND
+    # max HP both raised): the second and third fights must send nothing, since
+    # max_hp already meets the target the first fight reached.
+    class BufferTrackingMod(ScriptedMod):
+        def post_action(self, action, **kwargs):
+            result = super().post_action(action, **kwargs)
+            if action.get("action") == "debug_gain_max_hp":
+                self.max_hp += action["amount"]
+                self.hp += action["amount"]
+            return result
+
+    mod = BufferTrackingMod(current_profile_id=2)
+    mod.after_map_choice = "monster"
+    player = ScriptedFightPlayer(
+        mod, [(win_state(hp=500), 1), (win_state(hp=500), 1), (death(), 1)]
+    )
+    engine = StubEngine()
+    runlog = RunLog(tmp_path, subdir="runs", prefix="autopilot-")
+
+    autopilot.run(mod, engine, runlog, runs=1, buffer_hp=500, move_player=player)
+
+    buffer_actions = [a for a in mod.posted if a.get("action") == "debug_gain_max_hp"]
+    assert buffer_actions == [{"action": "debug_gain_max_hp", "amount": 420}]
+    assert mod.max_hp == 500
 
 
 def test_no_buffer_by_default(tmp_path):

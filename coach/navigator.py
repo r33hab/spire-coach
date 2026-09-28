@@ -14,6 +14,7 @@ from collections.abc import Callable
 
 from coach.bridge.client import BridgeError, ModClient
 from coach.config import CONF_FILE_NAME, read_allow_debug_actions
+from coach.runlog import RunLog
 
 _TAKEABLE_REWARD_TYPES = frozenset({"gold", "potion", "relic"})
 _DEFAULT_TIMEOUT_S = 30.0
@@ -88,6 +89,41 @@ def hp_of(state: dict) -> int | None:
 def act_of(state: dict) -> int | None:
     act = (state.get("run") or {}).get("act")
     return act if isinstance(act, int) and not isinstance(act, bool) else None
+
+
+def max_hp_of(state: dict) -> int | None:
+    max_hp = (state.get("player") or {}).get("max_hp")
+    return max_hp if isinstance(max_hp, int) and not isinstance(max_hp, bool) else None
+
+
+def apply_hp_buffer(
+    client: ModClient,
+    runlog: RunLog,
+    target_hp: int,
+    current_max_hp: int | None,
+    *,
+    source: str,
+    log_extra: dict | None = None,
+) -> None:
+    """Raise current and max HP to at least `target_hp` (fight-lab and autopilot's
+    `--buffer-hp`), never past it: `debug_gain_max_hp`'s own `amount` is a DELTA
+    added to both current and max HP (STS2MCP McpMod.Debug.cs
+    `ExecuteDebugGainMaxHp` -> `CreatureCmd.GainMaxHp`), not a target -- sending
+    `target_hp` again at the start of every fight, unconditionally, added instead
+    of set, and reached 110,080 max HP with `--buffer-hp 10000` over repeated
+    fights (bug 2/7). This sends only the top-up still needed (`target_hp` minus
+    the max HP the caller read just now), and nothing at all once a previous
+    fight already reached it, so the buffer settles at `target_hp` instead of
+    stacking."""
+    if current_max_hp is not None and current_max_hp >= target_hp:
+        return
+    delta = target_hp - (current_max_hp or 0)
+    try:
+        client.post_action({"action": "debug_gain_max_hp", "amount": delta})
+    except BridgeError as exc:
+        runlog.append("error", {"error": f"{source}: safety buffer failed: {exc}"})
+        return
+    runlog.append("buffer", {"target_hp": target_hp, "delta": delta, **(log_extra or {})})
 
 
 def _option_name(option: object) -> str:

@@ -169,7 +169,9 @@ def _play_run(
         acts_reached = max(acts_reached, navigator.act_of(state) or acts_reached)
         if autoplay.in_combat(state):
             if buffered:
-                _apply_buffer(client, buffer_hp, runlog)
+                navigator.apply_hp_buffer(
+                    client, runlog, buffer_hp, navigator.max_hp_of(state), source="autopilot"
+                )
             outcome = player.play_fight(state)
             state = outcome.state
             if state.get("state_type") == "game_over":
@@ -214,15 +216,6 @@ def _play_screen(
     if result is not None and strategyplay.execute_best_option(client, state, result):
         return
     navigator.advance_one_step(client, state)
-
-
-def _apply_buffer(client: ModClient, amount: int, runlog: RunLog) -> None:
-    try:
-        client.post_action({"action": "debug_gain_max_hp", "amount": amount})
-    except BridgeError as exc:
-        runlog.append("error", {"error": f"autopilot: safety buffer failed: {exc}"})
-        return
-    runlog.append("buffer", {"amount": amount})
 
 
 def _recover(client: ModClient) -> None:
