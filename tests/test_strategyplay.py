@@ -4,21 +4,42 @@ confidence."""
 
 from __future__ import annotations
 
+import time
+
+import pytest
+
 from coach.bridge.client import BridgeError
 from coach.engine import StrategyResult
 from coach.strategyplay import execute_best_option
 
 
+@pytest.fixture(autouse=True)
+def _no_real_sleep(monkeypatch):
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+
+
 class FakeClient:
-    def __init__(self, *, raises: Exception | None = None) -> None:
+    def __init__(self, *, raises: Exception | None = None, reads: list[dict] | None = None) -> None:
         self.posted: list[dict] = []
         self._raises = raises
+        # map.node's own follow-up wait (act_and_await_change) reads this once right
+        # after posting; a settled, different-from-baseline state resolves the wait on
+        # its first read, same as every other test here assumed before that wait
+        # existed. `reads`, if given, is consumed one at a time instead (repeating the
+        # last entry), for tests of the wait itself.
+        self._reads = reads or [{"state_type": "monster", "action_log_seq": 1, "is_resolving": False}]
+        self._read_i = 0
 
     def post_action(self, action: dict, **kwargs) -> dict:
         if self._raises is not None:
             raise self._raises
         self.posted.append(action)
         return {"status": "ok"}
+
+    def get_state(self) -> dict:
+        state = self._reads[min(self._read_i, len(self._reads) - 1)]
+        self._read_i += 1
+        return state
 
 
 def result_for(kind: str, **fields) -> StrategyResult:
@@ -64,6 +85,20 @@ def test_map_node_no_match_falls_back():
     assert execute_best_option(client, state, result_for("map.node", node=[0, 0, 1])) is False
 
 
+def test_map_node_waits_past_a_stale_read_and_never_double_clicks():
+    # bug 3&4/7: the same stale-read race as the generic fallback's own choose_map_node
+    # -- a read straight after the click can still show the room the click has not
+    # left yet, and acting on it again is what jams the game.
+    map_block = {"map": {"next_options": [{"index": 0, "type": "Monster"}]}}
+    baseline = {**map_block, "state_type": "map", "action_log_seq": 5, "is_resolving": False}
+    stale = dict(baseline)  # unchanged from baseline -- must not be trusted
+    settled = {"state_type": "monster", "action_log_seq": 6, "is_resolving": False}
+    client = FakeClient(reads=[stale, settled])
+
+    assert execute_best_option(client, baseline, result_for("map.node", node=[0, 0, 1])) is True
+    assert client.posted == [{"action": "choose_map_node", "index": 0}]
+
+
 def test_card_skip():
     client = FakeClient()
     assert execute_best_option(client, {}, result_for("card.skip")) is True
@@ -101,6 +136,39 @@ def test_card_take_selects_the_offered_card_by_its_screen_index():
 def test_card_take_with_no_action_index_falls_back():
     client = FakeClient()
     assert execute_best_option(client, {}, result_for("card.take")) is False
+    assert client.posted == []
+
+
+def test_neow_relic_selects_the_offered_relic_by_its_screen_index():
+    # rl/run_train/features.py: Option("neow.relic", choice["index"], relic=relic) --
+    # action is already the relic-select screen's own index, same convention as
+    # card.take (bug 7/7: Neow's relic choice was unmapped, generic-fallback only).
+    client = FakeClient()
+    assert execute_best_option(client, {}, result_for("neow.relic", action=1)) is True
+    assert client.posted == [{"action": "select_relic", "index": 1}]
+
+
+def test_neow_relic_with_no_action_index_falls_back():
+    client = FakeClient()
+    assert execute_best_option(client, {}, result_for("neow.relic")) is False
+    assert client.posted == []
+
+
+def test_select_offer_takes_the_offered_card_by_its_screen_index():
+    # features.py: every card_select screen's own cards -- Neow's transform/remove
+    # bonus, a rest site's Smith upgrade, a shop's removal, an event's transform --
+    # are uniformly select.offer (_card_option("select.offer", card, ...)), action
+    # already the card_select screen's own index (bug 7/7: previously unmapped, so
+    # every one of these fell to the generic "first card" fallback instead of the
+    # champion's actual pick).
+    client = FakeClient()
+    assert execute_best_option(client, {}, result_for("select.offer", action=0)) is True
+    assert client.posted == [{"action": "select_card", "index": 0}]
+
+
+def test_select_offer_with_no_action_index_falls_back():
+    client = FakeClient()
+    assert execute_best_option(client, {}, result_for("select.offer")) is False
     assert client.posted == []
 
 

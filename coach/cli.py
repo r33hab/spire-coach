@@ -470,6 +470,7 @@ def cmd_autopilot(
     buffer_hp: int = DEFAULT_AUTOPILOT_BUFFER_HP,
     workers: int = DEFAULT_WORKERS,
     budget_s: float = DEFAULT_BUDGET_S,
+    restart_on_jam: bool = False,
     client_factory: Callable[[str, str | None], ModClient] | None = None,
     engine_factory: Callable[[], EngineClient] | None = None,
 ) -> int:
@@ -513,6 +514,7 @@ def cmd_autopilot(
                 time_budget_s=budget_s,
                 game_version=read_game_version() or "unknown",
                 say=_say,
+                restart_on_jam=restart_on_jam,
             )
             _say(summary.format())
         finally:
@@ -1051,6 +1053,15 @@ def _build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_BUDGET_S,
         help="seconds of search per position (default: %(default)s)",
     )
+    autopilot_parser.add_argument(
+        "--restart-on-jam",
+        action="store_true",
+        help=(
+            "on a game jam (is_resolving stuck, the game ignoring all input), quit "
+            "and relaunch the game and continue with the next run, instead of "
+            "stopping (default: off -- stop with a clear message)"
+        ),
+    )
 
     return parser
 
@@ -1130,6 +1141,7 @@ def main(argv: list[str] | None = None) -> int:
                 buffer_hp=args.buffer_hp,
                 workers=args.workers,
                 budget_s=args.budget,
+                restart_on_jam=args.restart_on_jam,
             )
     except navigator.NavigatorError as exc:
         print(str(exc), file=sys.stderr)

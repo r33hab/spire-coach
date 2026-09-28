@@ -143,7 +143,7 @@ def run(
                     shards_root=shards_root,
                     runlog=runlog,
                 )
-            except (BridgeError, navigator.NavigatorError) as exc:
+            except (BridgeError, navigator.NavigatorError, autoplay.GameJamError) as exc:
                 say(f"  could not play this fight ({exc}); recovering")
                 runlog.append(
                     "error", {"error": f"fightlab: {exc}", "encounter": encounter.name}
@@ -190,13 +190,16 @@ def _play_one(
         # HP only, on purpose (spec): debug_gain_max_hp raises current and max HP and
         # rolls nothing else, so a longer fight is not also an easier one -- attack or
         # Strength would shorten it and hide the boss's later moves, the opposite of
-        # the point.
-        try:
-            client.post_action({"action": "debug_gain_max_hp", "amount": buffer_hp})
-        except BridgeError as exc:
-            runlog.append("error", {"error": f"fightlab: safety buffer failed: {exc}"})
-        else:
-            runlog.append("buffer", {"amount": buffer_hp, "encounter": encounter.name})
+        # the point. Tops up to buffer_hp rather than adding it every fight (bug 2/7:
+        # unconditional adding reached 110,080 max HP over repeated fights).
+        navigator.apply_hp_buffer(
+            client,
+            runlog,
+            buffer_hp,
+            navigator.max_hp_of(state),
+            source="fightlab",
+            log_extra={"encounter": encounter.name},
+        )
     cards = deckseed.sample_deck(encounter.act, shards_root=shards_root, rng=rng)
     staged: list[str] = []
     if cards:

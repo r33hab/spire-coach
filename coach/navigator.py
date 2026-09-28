@@ -14,6 +14,7 @@ from collections.abc import Callable
 
 from coach.bridge.client import BridgeError, ModClient
 from coach.config import CONF_FILE_NAME, read_allow_debug_actions
+from coach.runlog import RunLog
 
 _TAKEABLE_REWARD_TYPES = frozenset({"gold", "potion", "relic"})
 _DEFAULT_TIMEOUT_S = 30.0
@@ -90,6 +91,41 @@ def act_of(state: dict) -> int | None:
     return act if isinstance(act, int) and not isinstance(act, bool) else None
 
 
+def max_hp_of(state: dict) -> int | None:
+    max_hp = (state.get("player") or {}).get("max_hp")
+    return max_hp if isinstance(max_hp, int) and not isinstance(max_hp, bool) else None
+
+
+def apply_hp_buffer(
+    client: ModClient,
+    runlog: RunLog,
+    target_hp: int,
+    current_max_hp: int | None,
+    *,
+    source: str,
+    log_extra: dict | None = None,
+) -> None:
+    """Raise current and max HP to at least `target_hp` (fight-lab and autopilot's
+    `--buffer-hp`), never past it: `debug_gain_max_hp`'s own `amount` is a DELTA
+    added to both current and max HP (STS2MCP McpMod.Debug.cs
+    `ExecuteDebugGainMaxHp` -> `CreatureCmd.GainMaxHp`), not a target -- sending
+    `target_hp` again at the start of every fight, unconditionally, added instead
+    of set, and reached 110,080 max HP with `--buffer-hp 10000` over repeated
+    fights (bug 2/7). This sends only the top-up still needed (`target_hp` minus
+    the max HP the caller read just now), and nothing at all once a previous
+    fight already reached it, so the buffer settles at `target_hp` instead of
+    stacking."""
+    if current_max_hp is not None and current_max_hp >= target_hp:
+        return
+    delta = target_hp - (current_max_hp or 0)
+    try:
+        client.post_action({"action": "debug_gain_max_hp", "amount": delta})
+    except BridgeError as exc:
+        runlog.append("error", {"error": f"{source}: safety buffer failed: {exc}"})
+        return
+    runlog.append("buffer", {"target_hp": target_hp, "delta": delta, **(log_extra or {})})
+
+
 def _option_name(option: object) -> str:
     """The main menu's own options are plain strings; a popup's and the character
     select screen's are `{"name": ..., "enabled": ...}` dicts (confirmed live: a
@@ -133,13 +169,7 @@ def embark_run(
     `menu_select`'s `ascension` field sets the character-select screen's ascension
     panel before embarking (STS2MCP McpMod.Actions.cs `ApplyAscension`)."""
     _abandon_any_run_in_progress(client, timeout_s=timeout_s)
-    _select(client, "singleplayer")
-    _select(client, "standard")
-    state = poll_until(
-        client,
-        lambda s: s.get("menu_screen") == "character_select" and not s.get("selection_busy"),
-        timeout_s=timeout_s,
-    )
+    state = _reach_populated_character_select(client, timeout_s=timeout_s)
     names = _option_names(state)
     match = next((name for name in names if character.upper() in name.upper()), None)
     if match is None:
@@ -152,6 +182,42 @@ def embark_run(
     _select(client, confirm)
     state = poll_until(client, lambda s: act_of(s) is not None, timeout_s=timeout_s)
     return _reach_the_map(client, state, timeout_s=timeout_s)
+
+
+def _reach_populated_character_select(
+    client: ModClient, *, timeout_s: float, poll_s: float = _DEFAULT_POLL_S
+) -> dict:
+    """Reach the character-select screen with its roster actually populated.
+
+    Confirmed live, both right after a game (re)launch, from the same underlying
+    cause -- the game is not fully responsive yet: `singleplayer`/`standard` can land
+    before the main menu acts on them at all, so `menu_screen` can still read the main
+    menu's own options well after the clicks were sent
+    (autopilot-20260929-002103.jsonl); and separately, the character-select screen can
+    be reached while its roster is still empty for a beat
+    (autopilot-20260929-002138.jsonl: raised with `no 'Ironclad' option on character
+    select: []`). Retries the clicks, not just the read, until `timeout_s` runs out
+    (bug 6/7), so either delay is absorbed instead of failing on one poll.
+    """
+    deadline = time.monotonic() + timeout_s
+    _select(client, "singleplayer")
+    _select(client, "standard")
+    while True:
+        remaining = max(0.0, deadline - time.monotonic())
+        state = poll_until(
+            client,
+            lambda s: s.get("menu_screen") == "character_select" and not s.get("selection_busy"),
+            timeout_s=min(remaining, 5.0),
+        )
+        if state.get("menu_screen") == "character_select" and _option_names(state):
+            return state
+        if time.monotonic() >= deadline:
+            return state
+        if state.get("menu_screen") != "character_select":
+            _select(client, "singleplayer")
+            _select(client, "standard")
+        else:
+            time.sleep(poll_s)
 
 
 def _reach_the_map(client: ModClient, state: dict, *, timeout_s: float) -> dict:
@@ -262,17 +328,97 @@ def leave_run(client: ModClient, state: dict, *, timeout_s: float = _DEFAULT_TIM
     return poll_until(client, lambda s: s.get("state_type") == "menu", timeout_s=timeout_s)
 
 
+# --- navigation actions that start a room/screen transition -------------------------
+
+
+def act_and_await_change(
+    client: ModClient,
+    action: dict,
+    baseline: dict,
+    *,
+    timeout_s: float = _DEFAULT_TIMEOUT_S,
+    poll_s: float = _DEFAULT_POLL_S,
+) -> dict:
+    """Post a navigation action (`choose_map_node`, or any action that starts a
+    room/screen transition), then wait for proof it was actually seen -- a different
+    `state_type`, or a higher `action_log_seq`, than `baseline`'s -- with
+    `is_resolving` false, before returning.
+
+    `is_resolving` alone does not cover this: it tracks combat/action resolution
+    (`coach.bridge.decisions.is_settled`), not a room transition, so a read taken
+    right after `post_action` can still be the pre-click snapshot. Confirmed live
+    twice (autopilot-20260929-000347.jsonl, the newest autopilot-*.jsonl): acting on
+    that stale read is what sent a second navigation action into a transition already
+    under way, which is what opened the map overlay over a just-started fight and
+    jammed the game (bug 3/7 and bug 4/7 are the same race). Times out returning the
+    last state read either way, same as `poll_until`; raises only when `post_action`
+    itself does, same as calling it bare, so each caller's own error handling for a
+    failed post is unchanged -- only a read taken *during* the wait is ever retried.
+    """
+    client.post_action(action)
+    before_type = baseline.get("state_type")
+    before_seq = baseline.get("action_log_seq")
+    deadline = time.monotonic() + timeout_s
+    state = client.get_state()
+    while True:
+        seq = state.get("action_log_seq")
+        changed = state.get("state_type") != before_type or (
+            isinstance(seq, int) and isinstance(before_seq, int) and seq != before_seq
+        )
+        if changed and not state.get("is_resolving"):
+            return state
+        if time.monotonic() > deadline:
+            return state
+        time.sleep(poll_s)
+        state = client.get_state()
+
+
 # --- generic non-combat fallback ---------------------------------------------------
 
 
-def advance_one_step(client: ModClient, state: dict) -> dict:
+_KNOWN_FALLBACK_STATE_TYPES = frozenset(
+    {
+        "rewards",
+        "card_reward",
+        "card_select",
+        "map",
+        "treasure",
+        "shop",
+        "rest_site",
+        "event",
+        "relic_select",
+        "game_over",
+        "bundle_select",
+        "crystal_sphere",
+        "fake_merchant",
+        "menu",
+    }
+)
+
+
+def advance_one_step(client: ModClient, state: dict, *, runlog: RunLog | None = None) -> dict:
     """One simple, safe action on a non-combat screen: the "first non-skip option,
     then proceed" fallback the autopilot spec calls for when the strategy champion has
     no answer (no champion exported, an unscored screen, or a request error). Mirrors
     the throwaway drivers this module replaces (coach_drive.py, task12/drive.py) --
     not good play, just forward progress that never touches a fight's own decisions.
-    """
+
+    `runlog`, if given, gets one clear "error" entry the first time a `state_type` this
+    function does not recognize at all comes through (bug 7/7: previously an unhandled
+    screen -- the Crystal Sphere was the confirmed case, `proceed` alone does not reach
+    it -- just sent `proceed` silently forever with nothing in the log to explain why
+    the autopilot was not moving)."""
     state_type = state.get("state_type")
+    if runlog is not None and state_type not in _KNOWN_FALLBACK_STATE_TYPES:
+        runlog.append(
+            "error",
+            {
+                "error": (
+                    f"navigator: no fallback handling for state_type {state_type!r}; "
+                    "trying proceed and waiting"
+                )
+            },
+        )
     if state_type == "rewards":
         items = (state.get("rewards") or {}).get("items") or []
         take = [item for item in items if item.get("type") in _TAKEABLE_REWARD_TYPES]
@@ -288,7 +434,12 @@ def advance_one_step(client: ModClient, state: dict) -> dict:
         pick = next((o for o in options if o.get("type") in ("Monster", "Elite")), None)
         pick = pick or (options[0] if options else None)
         if pick is not None:
-            _try(client, {"action": "choose_map_node", "index": pick["index"]})
+            try:
+                return act_and_await_change(
+                    client, {"action": "choose_map_node", "index": pick["index"]}, state
+                )
+            except BridgeError:
+                pass
     elif state_type == "treasure":
         _try(client, {"action": "claim_treasure_relic", "index": 0})
         _try(client, {"action": "proceed"})
@@ -313,11 +464,50 @@ def advance_one_step(client: ModClient, state: dict) -> dict:
             _try(client, {"action": "choose_event_option", "index": options[0].get("index", 0)})
     elif state_type == "relic_select":
         _try(client, {"action": "select_relic", "index": 0})
+    elif state_type == "bundle_select":
+        # STS2MCP NChooseABundleSelectionScreen: select_bundle opens a preview,
+        # confirm_bundle_selection applies it (same two-step shape as a card_select
+        # grid's own preview -- confirm is best-effort, same as every other
+        # multi-action branch here).
+        bundles = (state.get("bundle_select") or {}).get("bundles") or []
+        if bundles:
+            if _try(client, {"action": "select_bundle", "index": bundles[0]["index"]}) is not None:
+                _try(client, {"action": "confirm_bundle_selection"})
+    elif state_type == "crystal_sphere":
+        _advance_crystal_sphere(client, state)
+    elif state_type == "fake_merchant":
+        # Fake Merchant (an event room the mod reports as its own state_type once its
+        # shop is up): the same room ExecuteProceed already special-cases (closes the
+        # auto-opened inventory first, then leaves) -- the generic proceed below
+        # already reaches it; named explicitly so it is never logged as unrecognized.
+        _try(client, {"action": "proceed"})
     elif state_type == "game_over":
         _try(client, {"action": "menu_select", "option": "main_menu"})
     else:
         _try(client, {"action": "proceed"})
     return client.get_state()
+
+
+def _advance_crystal_sphere(client: ModClient, state: dict) -> None:
+    """Confirmed stuck live (Act 2, floor 30): no `event` block and an empty options
+    list, so nothing before this branch existed found anything to act on.
+    `crystal_sphere.clickable_cells` (STS2MCP `BuildCrystalSphereState`) is already
+    exactly the mod's own "is_hidden and visible" cells -- click the first one; once
+    none are left, `crystal_sphere_proceed` leaves. A tool must be set before a click
+    does anything (`tool` reads "none" until then); "small" is the safer default
+    (reveals less, i.e. risks less) when both are offered."""
+    sphere = state.get("crystal_sphere") or {}
+    if sphere.get("tool") in (None, "none"):
+        if sphere.get("can_use_small_tool"):
+            _try(client, {"action": "crystal_sphere_set_tool", "tool": "small"})
+        elif sphere.get("can_use_big_tool"):
+            _try(client, {"action": "crystal_sphere_set_tool", "tool": "big"})
+    clickable = sphere.get("clickable_cells") or []
+    if clickable:
+        cell = clickable[0]
+        _try(client, {"action": "crystal_sphere_click_cell", "x": cell.get("x"), "y": cell.get("y")})
+    else:
+        _try(client, {"action": "crystal_sphere_proceed"})
 
 
 def _select_first_card(client: ModClient, state: dict) -> None:

@@ -75,6 +75,27 @@ def test_capture_dispatches_to_cmd_capture(monkeypatch, tmp_path):
     assert calls == [config]
 
 
+def test_autopilot_dispatches_with_the_defaults(monkeypatch, tmp_path):
+    config = make_config(tmp_path)
+    calls = []
+    monkeypatch.setattr(cli, "load_config", lambda: config)
+    monkeypatch.setattr(cli, "cmd_autopilot", lambda cfg, **kwargs: calls.append(kwargs) or 0)
+
+    assert cli.main(["autopilot"]) == 0
+    assert calls[0]["restart_on_jam"] is False
+
+
+def test_autopilot_dispatches_with_restart_on_jam(monkeypatch, tmp_path):
+    # Bug 3/7: the opt-in flag must actually reach cmd_autopilot/autopilot.run.
+    config = make_config(tmp_path)
+    calls = []
+    monkeypatch.setattr(cli, "load_config", lambda: config)
+    monkeypatch.setattr(cli, "cmd_autopilot", lambda cfg, **kwargs: calls.append(kwargs) or 0)
+
+    assert cli.main(["autopilot", "--restart-on-jam"]) == 0
+    assert calls[0]["restart_on_jam"] is True
+
+
 def test_saves_backup_dispatches_with_the_default_backup_root(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "load_config", lambda: make_config(tmp_path))
     calls = []
