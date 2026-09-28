@@ -27,6 +27,17 @@ design's real kind names -- `rl/run_train/features.py` OPTION_KINDS; there is no
 cards and their prices are not yet checked live end to end, so this module leaves the
 whole shop screen (besides `shop.leave`) to the generic fallback, which never buys
 anything, until that path is verified.
+
+`neow.relic` and `select.offer` (bug 7/7: Neow's relic pick and every card_select
+screen's own offered cards -- a rest site's Smith upgrade, a shop's removal, an event's
+or Neow's transform bonus, all built uniformly as `select.offer` by
+`rl/run_train/features.py`) both map like `card.take`: `option["action"]` is already
+the screen's own index. Deliberately still unmapped: `sphere.cell` (the Crystal
+Sphere) and `merchant.throw` (the Fake Merchant's foul-potion fight) -- neither kind's
+own live option shape (as opposed to its state, which `coach.navigator`'s generic
+fallback does handle) could be confirmed from the training source without a live run
+to check it against, so getting either wrong risks a silently-accepted bad action
+(`_post` does not check the mod's response) worse than leaving it to the fallback.
 """
 
 from __future__ import annotations
@@ -75,7 +86,26 @@ def _execute(client: ModClient, state: dict, kind: str, option: dict) -> bool:
         return _post(client, {"action": "proceed"})
     if kind == "select.offer_done":
         return _post(client, {"action": "confirm_selection"})
+    if kind == "neow.relic":
+        return _index_action(client, option, "select_relic", "index")
+    if kind == "select.offer":
+        return _index_action(client, option, "select_card", "index")
     return False
+
+
+def _index_action(client: ModClient, option: dict, action: str, field: str) -> bool:
+    """`option["action"]` is already the screen's own index (the training design's
+    convention for a plain "pick one of these by position" option -- the same one
+    `_take_card_reward` uses for `card.take`): `neow.relic` addresses the relic-select
+    screen's own `select_relic` index (features.py: `Option("neow.relic",
+    choice["index"], ...)`), `select.offer` a card_select screen's own `select_card`
+    index (every card_select's own cards are built as `select.offer`, regardless of
+    whether the screen is Neow's transform bonus, a rest site's Smith upgrade, a
+    shop's removal or an event's transform -- bug 7/7)."""
+    index = option.get("action")
+    if not isinstance(index, int) or isinstance(index, bool):
+        return False
+    return _post(client, {"action": action, field: index})
 
 
 def _map_node(client: ModClient, state: dict, option: dict) -> bool:

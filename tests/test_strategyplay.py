@@ -104,6 +104,39 @@ def test_card_take_with_no_action_index_falls_back():
     assert client.posted == []
 
 
+def test_neow_relic_selects_the_offered_relic_by_its_screen_index():
+    # rl/run_train/features.py: Option("neow.relic", choice["index"], relic=relic) --
+    # action is already the relic-select screen's own index, same convention as
+    # card.take (bug 7/7: Neow's relic choice was unmapped, generic-fallback only).
+    client = FakeClient()
+    assert execute_best_option(client, {}, result_for("neow.relic", action=1)) is True
+    assert client.posted == [{"action": "select_relic", "index": 1}]
+
+
+def test_neow_relic_with_no_action_index_falls_back():
+    client = FakeClient()
+    assert execute_best_option(client, {}, result_for("neow.relic")) is False
+    assert client.posted == []
+
+
+def test_select_offer_takes_the_offered_card_by_its_screen_index():
+    # features.py: every card_select screen's own cards -- Neow's transform/remove
+    # bonus, a rest site's Smith upgrade, a shop's removal, an event's transform --
+    # are uniformly select.offer (_card_option("select.offer", card, ...)), action
+    # already the card_select screen's own index (bug 7/7: previously unmapped, so
+    # every one of these fell to the generic "first card" fallback instead of the
+    # champion's actual pick).
+    client = FakeClient()
+    assert execute_best_option(client, {}, result_for("select.offer", action=0)) is True
+    assert client.posted == [{"action": "select_card", "index": 0}]
+
+
+def test_select_offer_with_no_action_index_falls_back():
+    client = FakeClient()
+    assert execute_best_option(client, {}, result_for("select.offer")) is False
+    assert client.posted == []
+
+
 def test_reward_proceed_shop_leave_rest_leave_all_proceed():
     for kind in ("reward.proceed", "shop.leave", "rest.leave"):
         client = FakeClient()

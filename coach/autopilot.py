@@ -232,7 +232,7 @@ def _play_screen(
             )
     if result is not None and strategyplay.execute_best_option(client, state, result):
         return
-    navigator.advance_one_step(client, state)
+    navigator.advance_one_step(client, state, runlog=runlog)
 
 
 def _recover(client: ModClient) -> None:

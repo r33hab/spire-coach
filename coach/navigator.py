@@ -331,14 +331,49 @@ def leave_run(client: ModClient, state: dict, *, timeout_s: float = _DEFAULT_TIM
 # --- generic non-combat fallback ---------------------------------------------------
 
 
-def advance_one_step(client: ModClient, state: dict) -> dict:
+_KNOWN_FALLBACK_STATE_TYPES = frozenset(
+    {
+        "rewards",
+        "card_reward",
+        "card_select",
+        "map",
+        "treasure",
+        "shop",
+        "rest_site",
+        "event",
+        "relic_select",
+        "game_over",
+        "bundle_select",
+        "crystal_sphere",
+        "fake_merchant",
+        "menu",
+    }
+)
+
+
+def advance_one_step(client: ModClient, state: dict, *, runlog: RunLog | None = None) -> dict:
     """One simple, safe action on a non-combat screen: the "first non-skip option,
     then proceed" fallback the autopilot spec calls for when the strategy champion has
     no answer (no champion exported, an unscored screen, or a request error). Mirrors
     the throwaway drivers this module replaces (coach_drive.py, task12/drive.py) --
     not good play, just forward progress that never touches a fight's own decisions.
-    """
+
+    `runlog`, if given, gets one clear "error" entry the first time a `state_type` this
+    function does not recognize at all comes through (bug 7/7: previously an unhandled
+    screen -- the Crystal Sphere was the confirmed case, `proceed` alone does not reach
+    it -- just sent `proceed` silently forever with nothing in the log to explain why
+    the autopilot was not moving)."""
     state_type = state.get("state_type")
+    if runlog is not None and state_type not in _KNOWN_FALLBACK_STATE_TYPES:
+        runlog.append(
+            "error",
+            {
+                "error": (
+                    f"navigator: no fallback handling for state_type {state_type!r}; "
+                    "trying proceed and waiting"
+                )
+            },
+        )
     if state_type == "rewards":
         items = (state.get("rewards") or {}).get("items") or []
         take = [item for item in items if item.get("type") in _TAKEABLE_REWARD_TYPES]
@@ -379,11 +414,50 @@ def advance_one_step(client: ModClient, state: dict) -> dict:
             _try(client, {"action": "choose_event_option", "index": options[0].get("index", 0)})
     elif state_type == "relic_select":
         _try(client, {"action": "select_relic", "index": 0})
+    elif state_type == "bundle_select":
+        # STS2MCP NChooseABundleSelectionScreen: select_bundle opens a preview,
+        # confirm_bundle_selection applies it (same two-step shape as a card_select
+        # grid's own preview -- confirm is best-effort, same as every other
+        # multi-action branch here).
+        bundles = (state.get("bundle_select") or {}).get("bundles") or []
+        if bundles:
+            if _try(client, {"action": "select_bundle", "index": bundles[0]["index"]}) is not None:
+                _try(client, {"action": "confirm_bundle_selection"})
+    elif state_type == "crystal_sphere":
+        _advance_crystal_sphere(client, state)
+    elif state_type == "fake_merchant":
+        # Fake Merchant (an event room the mod reports as its own state_type once its
+        # shop is up): the same room ExecuteProceed already special-cases (closes the
+        # auto-opened inventory first, then leaves) -- the generic proceed below
+        # already reaches it; named explicitly so it is never logged as unrecognized.
+        _try(client, {"action": "proceed"})
     elif state_type == "game_over":
         _try(client, {"action": "menu_select", "option": "main_menu"})
     else:
         _try(client, {"action": "proceed"})
     return client.get_state()
+
+
+def _advance_crystal_sphere(client: ModClient, state: dict) -> None:
+    """Confirmed stuck live (Act 2, floor 30): no `event` block and an empty options
+    list, so nothing before this branch existed found anything to act on.
+    `crystal_sphere.clickable_cells` (STS2MCP `BuildCrystalSphereState`) is already
+    exactly the mod's own "is_hidden and visible" cells -- click the first one; once
+    none are left, `crystal_sphere_proceed` leaves. A tool must be set before a click
+    does anything (`tool` reads "none" until then); "small" is the safer default
+    (reveals less, i.e. risks less) when both are offered."""
+    sphere = state.get("crystal_sphere") or {}
+    if sphere.get("tool") in (None, "none"):
+        if sphere.get("can_use_small_tool"):
+            _try(client, {"action": "crystal_sphere_set_tool", "tool": "small"})
+        elif sphere.get("can_use_big_tool"):
+            _try(client, {"action": "crystal_sphere_set_tool", "tool": "big"})
+    clickable = sphere.get("clickable_cells") or []
+    if clickable:
+        cell = clickable[0]
+        _try(client, {"action": "crystal_sphere_click_cell", "x": cell.get("x"), "y": cell.get("y")})
+    else:
+        _try(client, {"action": "crystal_sphere_proceed"})
 
 
 def _select_first_card(client: ModClient, state: dict) -> None:

@@ -457,3 +457,84 @@ def test_advance_one_step_game_over_returns_to_menu():
     mod.state_type = "game_over"
     advance_one_step(mod, mod.get_state())
     assert {"action": "menu_select", "option": "main_menu"} in mod.posted
+
+
+# --- generic fallback: bundle_select, Crystal Sphere, Fake Merchant, unknown --------
+
+
+def test_advance_one_step_bundle_select_picks_the_first_bundle_and_confirms():
+    mod = ScriptedMod()
+    mod.state_type = "bundle_select"
+    mod.extra_state = {"bundle_select": {"bundles": [{"index": 0}, {"index": 1}]}}
+    advance_one_step(mod, mod.get_state())
+    assert {"action": "select_bundle", "index": 0} in mod.posted
+    assert {"action": "confirm_bundle_selection"} in mod.posted
+
+
+def test_advance_one_step_crystal_sphere_sets_a_tool_before_the_first_click():
+    # Confirmed stuck live (Act 2, floor 30): state_type crystal_sphere, no event
+    # block, options empty -- nothing before this handled it at all.
+    mod = ScriptedMod()
+    mod.state_type = "crystal_sphere"
+    mod.extra_state = {
+        "crystal_sphere": {
+            "tool": "none",
+            "can_use_small_tool": True,
+            "can_use_big_tool": True,
+            "clickable_cells": [{"x": 1, "y": 2}, {"x": 3, "y": 4}],
+        }
+    }
+    advance_one_step(mod, mod.get_state())
+    assert {"action": "crystal_sphere_set_tool", "tool": "small"} in mod.posted
+    assert {"action": "crystal_sphere_click_cell", "x": 1, "y": 2} in mod.posted
+
+
+def test_advance_one_step_crystal_sphere_proceeds_once_no_cells_are_clickable():
+    mod = ScriptedMod()
+    mod.state_type = "crystal_sphere"
+    mod.extra_state = {
+        "crystal_sphere": {"tool": "small", "can_use_small_tool": True, "clickable_cells": []}
+    }
+    advance_one_step(mod, mod.get_state())
+    assert {"action": "crystal_sphere_proceed"} in mod.posted
+    assert not any(a.get("action") == "crystal_sphere_click_cell" for a in mod.posted)
+
+
+def test_advance_one_step_fake_merchant_proceeds():
+    mod = ScriptedMod()
+    mod.state_type = "fake_merchant"
+    advance_one_step(mod, mod.get_state())
+    assert {"action": "proceed"} in mod.posted
+
+
+def test_advance_one_step_logs_an_unrecognized_state_type_when_given_a_runlog(tmp_path):
+    mod = ScriptedMod()
+    mod.state_type = "some_new_screen_this_module_has_never_seen"
+    runlog = RunLog(tmp_path, subdir="runs", prefix="test-")
+
+    advance_one_step(mod, mod.get_state(), runlog=runlog)
+
+    lines = [json.loads(line) for line in runlog.path.read_text(encoding="utf-8").splitlines()]
+    assert any(
+        line["kind"] == "error" and "some_new_screen_this_module_has_never_seen" in line["payload"]["error"]
+        for line in lines
+    )
+
+
+def test_advance_one_step_does_not_log_a_recognized_state_type(tmp_path):
+    mod = ScriptedMod()
+    mod.state_type = "shop"
+    runlog = RunLog(tmp_path, subdir="runs", prefix="test-")
+
+    advance_one_step(mod, mod.get_state(), runlog=runlog)
+
+    assert not runlog.path.exists()
+
+
+def test_advance_one_step_without_a_runlog_still_works(tmp_path):
+    # runlog is optional (existing callers, and every other test in this file, never
+    # pass one) -- must not raise for an unrecognized state_type either.
+    mod = ScriptedMod()
+    mod.state_type = "some_new_screen_this_module_has_never_seen"
+    advance_one_step(mod, mod.get_state())  # must not raise
+    assert {"action": "proceed"} in mod.posted
