@@ -103,6 +103,7 @@ def run(
         game_version=game_version,
         source="autopilot",
     )
+    initial_state = client.get_state()
     runlog.append(
         "session",
         {
@@ -110,9 +111,16 @@ def run(
             "runs": runs,
             "ascension": ascension,
             "buffer_hp": buffer_hp,
-            **navigator.session_header(client.get_state()),
+            **navigator.session_header(initial_state),
         },
     )
+    # Bug 5/7: started mid-run (at Neow, the map, a fight...) rather than at the main
+    # menu, this used to call embark_run unconditionally regardless -- which abandons
+    # nothing (no saved run to abandon, the current one is live), then waits forever
+    # for a main menu that was never coming. Only the first of `runs` can possibly
+    # resume a run already in progress; every run after that really did just end, back
+    # at the main menu, and embarks fresh as before.
+    resume_state = initial_state if initial_state.get("state_type") != "menu" else None
     summary = AutopilotSummary()
     try:
         for _ in range(runs):
@@ -131,12 +139,15 @@ def run(
                     ascension=ascension,
                     buffer_hp=buffer_hp,
                     stop=stop,
+                    resume_state=resume_state,
                 )
             except (BridgeError, navigator.NavigatorError) as exc:
+                resume_state = None
                 say(f"  run failed ({exc}); recovering")
                 runlog.append("error", {"error": f"autopilot: {exc}"})
                 _recover(client)
                 continue
+            resume_state = None
             summary.add(record)
             say(
                 f"  -> {'won' if record.won else 'died'} on floor {record.floor}, "
@@ -156,8 +167,14 @@ def _play_run(
     ascension: int,
     buffer_hp: int,
     stop: Callable[[], bool],
+    resume_state: dict | None = None,
 ) -> RunRecord:
-    state = navigator.embark_run(client, ascension=ascension)
+    # Bug 5/7: `resume_state` is the screen the game was already on when this
+    # (the first) run started -- anything but the main menu -- so play continues
+    # from there instead of embark_run abandoning/waiting for a run that is not over.
+    state = resume_state if resume_state is not None else navigator.embark_run(
+        client, ascension=ascension
+    )
     buffered = buffer_hp > 0
     moves_before = player.stats.moves
     acts_reached = navigator.act_of(state) or 1

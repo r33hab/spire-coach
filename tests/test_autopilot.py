@@ -146,6 +146,50 @@ def test_run_falls_back_when_the_engine_has_no_model(tmp_path):
     assert strategy_errors and "error" in strategy_errors[0]["payload"]
 
 
+def test_run_started_mid_run_plays_from_the_current_screen_without_embarking(tmp_path):
+    # Bug 5/7: started mid-run (e.g. at Neow, or -- as here -- the map after a fight),
+    # it used to call embark_run unconditionally regardless of the mod's actual
+    # state_type, which only records the session header and then waits for a main
+    # menu that a live run is nowhere near. Must play from whatever screen is
+    # current instead: no menu_select at all, straight to the map's own fallback.
+    mod = make_mod()
+    mod.state_type = "map"  # already mid-run when autopilot starts, not "menu"
+    mod.next_map_options = [{"index": 0, "type": "Monster"}]
+    mod.after_map_choice = "monster"
+    player = ScriptedFightPlayer(mod, [(death(), 1)])
+    engine = StubEngine()
+    runlog = RunLog(tmp_path, subdir="runs", prefix="autopilot-")
+
+    summary = autopilot.run(mod, engine, runlog, runs=1, move_player=player)
+
+    # No embark_run at all: none of its own menu clicks (leave_run's own
+    # menu_select("main_menu") once the run legitimately ends is fine and expected).
+    embark_options = {"singleplayer", "standard", "Ironclad", "confirm", "embark"}
+    assert not any(
+        a.get("action") == "menu_select" and a.get("option") in embark_options
+        for a in mod.posted
+    )
+    assert {"action": "choose_map_node", "index": 0} in mod.posted
+    assert summary.runs_played == 1
+
+
+def test_run_only_the_first_of_several_runs_can_resume_mid_run(tmp_path):
+    # A second run always follows a real ending (game_over or the main menu), so it
+    # must embark normally even though the first one skipped it.
+    mod = make_mod()
+    mod.state_type = "map"
+    mod.next_map_options = [{"index": 0, "type": "Monster"}]
+    mod.after_map_choice = "monster"
+    player = ScriptedFightPlayer(mod, [(death(), 1), (death(), 1)])
+    engine = StubEngine()
+    runlog = RunLog(tmp_path, subdir="runs", prefix="autopilot-")
+
+    summary = autopilot.run(mod, engine, runlog, runs=2, move_player=player)
+
+    assert summary.runs_played == 2
+    assert any(a.get("option") == "Ironclad" for a in mod.posted)  # the second run embarked
+
+
 def test_buffer_hp_applies_debug_gain_max_hp_before_each_fight_and_logs_it(tmp_path):
     # ScriptedMod's default max_hp is 80 (fake_mod.py), so a target of 500 tops up by
     # 420 -- debug_gain_max_hp's own "amount" is a delta (bug 2/7), not the target.
