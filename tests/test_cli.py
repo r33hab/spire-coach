@@ -833,29 +833,30 @@ def export_prior(config):
     return folder
 
 
-def test_the_prior_is_on_by_default_only_when_one_is_exported(tmp_path):
+def test_the_prior_is_off_by_default_and_on_with_prior(tmp_path):
     config = make_config(tmp_path)
     assert cli.combat_prior_dir(config) == tmp_path / "data" / "models" / "combat_prior"
+    assert cli.DEFAULT_PRIOR is False  # it did not help at the coach's budget (E2)
+    assert cli._prior_dir(config, None) is None
+    folder = export_prior(config)
+    assert cli._prior_dir(config, None) is None  # exported, but off by default
+    assert cli._prior_dir(config, True) == folder  # --prior
+    assert cli._prior_dir(config, False) is None  # --no-prior
+
+
+def test_an_automatic_default_follows_the_export(monkeypatch, tmp_path):
+    config = make_config(tmp_path)
+    monkeypatch.setattr(cli, "DEFAULT_PRIOR", None)
     assert cli._prior_dir(config, None) is None  # nothing exported: the plain search
-    assert cli._prior_dir(config, False) is None
     folder = export_prior(config)
     assert cli._prior_dir(config, None) == folder
-    assert cli._prior_dir(config, True) == folder
-    assert cli._prior_dir(config, False) is None  # --no-prior
+    assert cli._prior_dir(config, False) is None
 
 
 def test_prior_without_an_exported_prior_is_refused(tmp_path):
     config = make_config(tmp_path)
     with pytest.raises(cli.CoachError, match="no combat prior is exported to"):
         cli._prior_dir(config, True)
-
-
-def test_the_default_can_be_off_even_with_a_prior_exported(monkeypatch, tmp_path):
-    config = make_config(tmp_path)
-    folder = export_prior(config)
-    monkeypatch.setattr(cli, "DEFAULT_PRIOR", False)
-    assert cli._prior_dir(config, None) is None
-    assert cli._prior_dir(config, True) == folder
 
 
 def test_the_coach_starts_the_engine_with_the_exported_prior(monkeypatch, tmp_path, capsys):
@@ -871,10 +872,10 @@ def test_the_coach_starts_the_engine_with_the_exported_prior(monkeypatch, tmp_pa
         raise Stop
 
     monkeypatch.setattr(cli, "EngineClient", engine)
-    for prior in (None, False):
+    for prior in (True, None, False):
         with pytest.raises(Stop):
             cli.cmd_coach(config, prior=prior, client_factory=lambda url, token: FakeMod())
-    assert [kwargs["prior_dir"] for kwargs in made] == [folder, None]
+    assert [kwargs["prior_dir"] for kwargs in made] == [folder, None, None]
 
 
 @pytest.mark.parametrize(

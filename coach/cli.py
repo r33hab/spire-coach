@@ -61,8 +61,11 @@ MOD_ID = "STS2_MCP"
 DEFAULT_WORKERS = 4  # the engine service's search workers (spec 5.3)
 DEFAULT_BUDGET_S = 1.5  # seconds of search per position (spec 5.3, 7.3)
 # Whether the engine's fight search plays the combat prior when neither --prior nor
-# --no-prior is given. None: whenever the prior loop has exported one (`_prior_dir`).
-DEFAULT_PRIOR: bool | None = None
+# --no-prior is given; None would be whenever the prior loop has exported one. Off: at the
+# coach's own budget (4 workers, 1.5 s, some 40,000 simulations a move) the round-1 prior
+# played 300 held-out real fights to +0.07 HP (95% CI -0.61, +0.74) with 72 deaths against
+# the plain search's 60 (roadmap E2, sts2 `rl/prior_loop/coach_check.py`).
+DEFAULT_PRIOR: bool | None = False
 DEFAULT_LAB_ACTS = (2, 3, 1)  # Act 2-3 first, then the rest
 DEFAULT_LAB_ASCENSION = 10
 DEFAULT_LAB_FIGHTS = 20
