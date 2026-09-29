@@ -88,6 +88,10 @@ def _execute(client: ModClient, state: dict, kind: str, option: dict) -> bool:
     if kind == "select.offer_done":
         return _post(client, {"action": "confirm_selection"})
     if kind == "neow.relic":
+        if state.get("state_type") == "event":
+            # An Ancient's relic offer after Act 1 (Pael, live 2026-09-29) is an event
+            # screen: select_relic does nothing there, choose_event_option takes it.
+            return _index_action(client, option, "choose_event_option", "index")
         return _index_action(client, option, "select_relic", "index")
     if kind == "select.offer":
         grid = state.get("card_select") or {}

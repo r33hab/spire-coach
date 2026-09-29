@@ -201,3 +201,17 @@ def test_no_shop_purchase_kind_is_ever_mapped():
     for kind in ("shop.card", "shop.relic", "shop.potion", "shop.remove"):
         assert execute_best_option(client, {}, result_for(kind, deck_index=0)) is False
     assert client.posted == []
+
+
+def test_an_ancient_relic_offer_on_an_event_screen_uses_choose_event_option():
+    # Live (2026-09-29, Pael at the start of Act 2): the offer is an event screen, where
+    # select_relic does nothing and the autopilot stalled; choose_event_option takes it.
+    client = FakeClient()
+    assert execute_best_option(client, {"state_type": "event"}, result_for("neow.relic", action=1))
+    assert client.posted == [{"action": "choose_event_option", "index": 1}]
+
+
+def test_neows_own_relic_screen_still_uses_select_relic():
+    client = FakeClient()
+    execute_best_option(client, {"state_type": "relic_select"}, result_for("neow.relic", action=0))
+    assert client.posted == [{"action": "select_relic", "index": 0}]
