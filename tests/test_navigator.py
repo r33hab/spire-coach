@@ -662,3 +662,19 @@ def test_rewards_skip_a_potion_when_the_belt_is_full_and_proceed():
     navigator.advance_one_step(client, state)
     assert {"action": "proceed"} in client.posted
     assert not any(a.get("action") == "claim_reward" for a in client.posted)
+
+
+def test_an_unknown_screen_is_waited_out_not_proceeded(monkeypatch):
+    # Live (2026-09-29): after End turn in an elite fight the game reported "unknown"
+    # for a moment; the fallback's proceed opened the map mid-fight and jammed the game.
+    clock = [1000.0]
+    monkeypatch.setattr(navigator.time, "monotonic", lambda: clock[0])
+    navigator._UNKNOWN_SINCE.clear()
+    state = {"state_type": "unknown"}
+    client = _SequencedClient([state])
+    navigator.advance_one_step(client, state)
+    assert client.posted == []
+    clock[0] += navigator.UNKNOWN_PROCEED_AFTER_S + 1
+    navigator.advance_one_step(client, state)
+    assert client.posted == [{"action": "proceed"}]
+    navigator._UNKNOWN_SINCE.clear()

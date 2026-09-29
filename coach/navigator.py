@@ -396,6 +396,10 @@ _KNOWN_FALLBACK_STATE_TYPES = frozenset(
 )
 
 
+UNKNOWN_PROCEED_AFTER_S = 30.0  # how long an "unknown" screen lasts before a proceed
+_UNKNOWN_SINCE: dict[str, float] = {}
+
+
 def advance_one_step(client: ModClient, state: dict, *, runlog: RunLog | None = None) -> dict:
     """One simple, safe action on a non-combat screen: the "first non-skip option,
     then proceed" fallback the autopilot spec calls for when the strategy champion has
@@ -409,6 +413,15 @@ def advance_one_step(client: ModClient, state: dict, *, runlog: RunLog | None = 
     it -- just sent `proceed` silently forever with nothing in the log to explain why
     the autopilot was not moving)."""
     state_type = state.get("state_type")
+    if state_type in (None, "unknown"):
+        # A transition -- the enemy's turn, an animation -- not a screen. `proceed` here
+        # opened the map mid-fight and jammed the game (live, 2026-09-29): wait it out,
+        # and only an unknown screen that lasts gets a proceed.
+        first = _UNKNOWN_SINCE.setdefault("t", time.monotonic())
+        if time.monotonic() - first < UNKNOWN_PROCEED_AFTER_S:
+            return client.get_state()
+    else:
+        _UNKNOWN_SINCE.pop("t", None)
     if runlog is not None and state_type not in _KNOWN_FALLBACK_STATE_TYPES:
         runlog.append(
             "error",
