@@ -13,7 +13,6 @@ from fakes.fake_mod import ScriptedMod
 
 from coach import autopilot, autoplay
 from coach.autoplay import FightOutcome, GameJamError
-from coach.bridge.client import BridgeError
 from coach.engine import EngineError, StrategyResult
 from coach.runlog import RunLog
 
