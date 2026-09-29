@@ -753,6 +753,35 @@ def test_an_optional_grid_pick_is_declined_by_confirming_nothing():
     assert _selection_step(cancelable, _NO_ENGINE_MOVE)[1] == {"action": "cancel_selection"}
 
 
+def test_auto_kill_is_posted_without_waiting_for_the_game_to_settle(tmp_path):
+    # Live (autopilot-20260929-212559.jsonl, -221934.jsonl): the mod fires the kill and
+    # replies at once, but an action posted with the default wait holds the reply until
+    # the game settles -- and a kill's death and stage hooks outlast the client's 10 s:
+    # "mod did not respond within 10.0s". Every auto-kill read as refused, and the
+    # autopilot abandoned runs whose wall it had just cleared.
+    class SlowSettleBridge(ScriptedBridge):
+        def post_action(self, action, **kwargs):
+            if action.get("action") == "debug_kill_enemy" and kwargs.get("wait", True):
+                self.posted.append(action)
+                raise BridgeError("mod did not respond within 10.0s: is the game busy or paused?")
+            return super().post_action(action, **kwargs)
+
+    states = [combat_round(r, 100) for r in range(1, 7)]
+    bridge = SlowSettleBridge([*states, rewards()])
+    engine = ScriptedEngine([END_TURN])
+    runlog = RunLog(tmp_path, subdir="runs", prefix="test-")
+    player = MovePlayer(
+        bridge, engine, runlog, game_version="v0.107.1", no_progress_rounds=3,
+        auto_kill_no_progress=True,
+    )
+
+    outcome = player.play_fight(bridge.get_state())
+
+    assert outcome.gave_up is False
+    assert outcome.ok is True
+    assert {"action": "debug_kill_enemy"} in bridge.posted
+
+
 # --- a move the game keeps ignoring (Test Subject between stages, live 2026-09-29) -----
 
 

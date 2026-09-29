@@ -603,9 +603,15 @@ class MovePlayer:
         or nothing left alive to kill) is logged and reported as failure, not raised --
         the caller falls back to letting the fight/run end. Logged as its own kind
         "debug" session record (with the action), so the fidelity tools can see a
-        debug-assisted fight."""
+        debug-assisted fight.
+
+        Posted with `wait=False`: the mod fires the kill and replies at once, but the
+        default wait holds the reply until the game settles, and a kill's death and
+        stage hooks outlast the client's 10 s -- live 2026-09-29, every auto-kill failed
+        "mod did not respond within 10.0s" and the run was abandoned. The caller's own
+        settle-wait follows."""
         try:
-            self._client.post_action({"action": "debug_kill_enemy"})
+            self._client.post_action({"action": "debug_kill_enemy"}, wait=False)
         except BridgeError as exc:
             self._runlog.append(
                 "error", {"error": f"autoplay: debug_kill_enemy failed ({reason}): {exc}"}
