@@ -339,6 +339,7 @@ def _start_run(
                     "error",
                     {"error": "autopilot: start failed (0 moves, no floor reached); retrying"},
                 )
+                _recover(client)  # back to the main menu, or the retry cannot embark
                 failed_starts += 1
             else:
                 return record, False
@@ -363,7 +364,7 @@ def _play_run(
     # (the first) run started -- anything but the main menu -- so play continues
     # from there instead of embark_run abandoning/waiting for a run that is not over.
     state = resume_state if resume_state is not None else navigator.embark_run(
-        client, ascension=ascension
+        client, ascension=ascension, through_neow=False
     )
     buffered = buffer_hp > 0
     moves_before = player.stats.moves

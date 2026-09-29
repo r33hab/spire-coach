@@ -43,6 +43,13 @@ class ScriptedMod:
         # `options` empty for that many get_state() reads first.
         self.character_select_delay_reads = 0
         self._character_select_reads_seen = 0
+        # Confirmed live (20260926-010632.jsonl): character_select already reports the
+        # new run's `run.act` while `state_type` is still "menu". A positive count keeps
+        # that screen for that many get_state() reads after confirm/embark.
+        self.embark_menu_reads = 0
+        self._embark_menu_reads_left = 0
+        # The screen a new run opens on: the real game opens on Neow's event.
+        self.run_start_state_type = "map"
 
     # --- ModClient's interface ------------------------------------------------
 
@@ -55,6 +62,10 @@ class ScriptedMod:
         return {"current_profile_id": self.current_profile_id, "profiles": []}
 
     def get_state(self) -> dict:
+        if self._embark_menu_reads_left > 0:
+            self._embark_menu_reads_left -= 1
+            if self._embark_menu_reads_left == 0:
+                self._land_in_run()
         if (
             self.menu_screen == "character_select"
             and not self.options
@@ -125,14 +136,22 @@ class ScriptedMod:
             if "ascension" in action:
                 self.extra_state["ascension_set"] = action["ascension"]
         elif option in ("confirm", "embark"):
-            self.state_type = "map"
             self.act = 1
-            self.floor = 1
-            self.selected_character = None
-            self.selection_busy = False
+            if self.embark_menu_reads > 0:
+                self.floor = 0
+                self._embark_menu_reads_left = self.embark_menu_reads + 1
+            else:
+                self._land_in_run()
         elif option == "main_menu":
             self._to_main_menu()
         return {"status": "ok"}
+
+    def _land_in_run(self) -> None:
+        self.state_type = self.run_start_state_type
+        self.act = 1
+        self.floor = 1
+        self.selected_character = None
+        self.selection_busy = False
 
     def _do_return_to_main_menu(self, action: dict) -> dict:
         self._to_main_menu()

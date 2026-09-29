@@ -163,11 +163,16 @@ def embark_run(
     ascension: int,
     character: str = "Ironclad",
     timeout_s: float = _DEFAULT_TIMEOUT_S,
+    through_neow: bool = True,
 ) -> dict:
     """From the main menu, start a fresh singleplayer/standard run as `character` at
     `ascension`, abandoning a saved-but-unfinished run first if there is one.
     `menu_select`'s `ascension` field sets the character-select screen's ascension
-    panel before embarking (STS2MCP McpMod.Actions.cs `ApplyAscension`)."""
+    panel before embarking (STS2MCP McpMod.Actions.cs `ApplyAscension`).
+
+    `through_neow` clicks Neow's first offer and on to the map (the fight lab, which
+    needs the map); False returns on Neow's own screen, for a caller (the autopilot)
+    whose strategy makes that pick itself."""
     _abandon_any_run_in_progress(client, timeout_s=timeout_s)
     state = _reach_populated_character_select(client, timeout_s=timeout_s)
     names = _option_names(state)
@@ -180,7 +185,16 @@ def embark_run(
     )
     confirm = "confirm" if "confirm" in _option_names(state) else "embark"
     _select(client, confirm)
-    state = poll_until(client, lambda s: act_of(s) is not None, timeout_s=timeout_s)
+    # Not `act_of` alone: character_select already carries the new run's act while it
+    # is still on screen (20260926-010632.jsonl), which returned a menu state the
+    # autopilot then read as the run already over (autopilot-20260929-183924.jsonl).
+    state = poll_until(
+        client,
+        lambda s: act_of(s) is not None and s.get("state_type") != "menu",
+        timeout_s=timeout_s,
+    )
+    if not through_neow:
+        return state
     return _reach_the_map(client, state, timeout_s=timeout_s)
 
 

@@ -99,6 +99,29 @@ def test_embark_run_reaches_the_map_with_the_asked_ascension():
     assert character_pick["ascension"] == 10
 
 
+def test_embark_run_waits_until_the_game_has_left_character_select():
+    # Confirmed live (autopilot-20260929-183924.jsonl, 5 failed starts in a row):
+    # character_select already carries the new run's `run.act` while state_type is
+    # still "menu", so "the run has an act" passed before the game left the menu.
+    # embark_run returned that menu state, the autopilot read it as the run already
+    # over (0 moves, no floor), and the game was left sitting on Neow's pick.
+    mod = ScriptedMod()
+    mod.embark_menu_reads = 3
+    state = embark_run(mod, ascension=10)
+    assert state["state_type"] == "map"
+
+
+def test_embark_run_can_leave_neow_to_the_caller():
+    # The autopilot's strategy picks Neow's relic itself (strategyplay "neow.relic");
+    # only the fight lab needs embark_run to click straight through to the map.
+    mod = ScriptedMod()
+    mod.run_start_state_type = "event"
+    mod.event_options = [{"index": 0, "title": "Pomander"}, {"index": 1, "title": "Lost Coffer"}]
+    state = embark_run(mod, ascension=10, through_neow=False)
+    assert state["state_type"] == "event"
+    assert not any(a.get("action") == "choose_event_option" for a in mod.posted)
+
+
 def test_embark_run_retries_while_character_select_options_are_still_empty(tmp_path):
     # Bug 6/7, confirmed live right after a game restart: character_select is reached
     # (menu_screen alone) before its roster has populated, so a single read raises "no
