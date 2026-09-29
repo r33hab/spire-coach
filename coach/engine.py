@@ -191,8 +191,8 @@ def _strategy_result_from_dict(data: dict) -> StrategyResult:
 _STS2_DIR = Path.home() / "Documents/git/sts2"
 
 
-def _default_cmd(workers: int) -> list[str]:
-    return [
+def _default_cmd(workers: int, prior_dir: Path | None = None) -> list[str]:
+    cmd = [
         "uv",
         "run",
         "--project",
@@ -203,6 +203,9 @@ def _default_cmd(workers: int) -> list[str]:
         "--workers",
         str(workers),
     ]
+    if prior_dir is not None:
+        cmd += ["--prior-dir", str(prior_dir)]
+    return cmd
 
 
 def _default_env() -> dict[str, str]:
@@ -247,14 +250,19 @@ class EngineClient:
         request_timeout_s: float = 10.0,
         on_restart: Callable[[], None] | None = None,
         extra_env: dict[str, str] | None = None,
+        prior_dir: Path | None = None,
     ) -> None:
         """`extra_env` is merged into the service's environment on top of the coach's
         own (or, with a custom `cmd`, used as its whole environment): the autopilot
         sets `STS2_STRATEGY_MODEL_DIR` this way to point the service at the full-run
         champion, without the coach's own `coach` command (no `extra_env`) changing
-        which one it uses."""
+        which one it uses.
+
+        `prior_dir` makes the service's fight search play the combat prior exported
+        there (its `--prior-dir`); None searches without one, as before. A custom `cmd`
+        carries its own arguments, so it ignores `prior_dir`."""
         if cmd is None:
-            self._cmd = _default_cmd(workers)
+            self._cmd = _default_cmd(workers, prior_dir)
             self._cwd: Path | None = _STS2_DIR
             self._env: dict[str, str] | None = _default_env()
             if extra_env:

@@ -61,6 +61,14 @@ DEFAULT_MOD_REPO = Path.home() / "Documents" / "git" / "STS2MCP"
 MOD_ID = "STS2_MCP"
 DEFAULT_WORKERS = 4  # the engine service's search workers (spec 5.3)
 DEFAULT_BUDGET_S = 1.5  # seconds of search per position (spec 5.3, 7.3)
+# Whether the engine's fight search plays the combat prior when neither --prior nor
+# --no-prior is given; None would be whenever the prior loop has exported one. Off: at the
+# coach's own budget (4 workers, 1.5 s, some 40,000 simulations a move) the round-1 prior
+# played 300 held-out real fights to +0.42 HP (95% CI -0.19, +1.03) with 56 deaths against
+# the plain search's 50, and 300 more (before the boss-check fixes) to +0.07 HP with 72
+# against 60: 25 fights lost only with it, 7 only without (roadmap E2, sts2
+# `rl/prior_loop/coach_check.py`).
+DEFAULT_PRIOR: bool | None = False
 DEFAULT_LAB_ACTS = (2, 3, 1)  # Act 2-3 first, then the rest
 DEFAULT_LAB_ASCENSION = 10
 DEFAULT_LAB_FIGHTS = 20
@@ -414,6 +422,7 @@ def cmd_fight_lab(
     buffer_hp: int = DEFAULT_LAB_BUFFER_HP,
     workers: int = DEFAULT_WORKERS,
     budget_s: float = DEFAULT_BUDGET_S,
+    prior: bool | None = None,
     client_factory: Callable[[str, str | None], ModClient] | None = None,
     engine_factory: Callable[[], EngineClient] | None = None,
 ) -> int:
@@ -421,6 +430,7 @@ def cmd_fight_lab(
     coach.fightlab). Stops at the first unmet precondition, printing exactly what to
     fix, same as `doctor`."""
     acts = list(DEFAULT_LAB_ACTS) if acts is None else acts
+    prior_dir = _prior_dir(config, prior)
     client = (
         client_factory or (lambda url, token: ModClient(url, token, timeout_s=LAB_CLIENT_TIMEOUT_S))
     )(config.base_url, config.token)
@@ -431,7 +441,8 @@ def cmd_fight_lab(
                 _say(problem, error=True)
             return 1
         _set_time_scale(client, time_scale)
-        engine = (engine_factory or (lambda: EngineClient(workers=workers)))()
+        engine = (engine_factory or (lambda: EngineClient(workers=workers, prior_dir=prior_dir)))()
+        _say_prior(prior_dir)
         try:
             problems = engine_health_problems(engine, timeout_s=config.engine_start_timeout_s)
             if problems:
@@ -474,6 +485,7 @@ def cmd_autopilot(
     restart_on_jam: bool = False,
     auto_kill: bool = True,
     auto_kill_rounds: int = autoplay.DEFAULT_AUTO_KILL_NO_PROGRESS_ROUNDS,
+    prior: bool | None = None,
     client_factory: Callable[[str, str | None], ModClient] | None = None,
     engine_factory: Callable[[], EngineClient] | None = None,
     fresh_run: bool = False,
@@ -481,6 +493,7 @@ def cmd_autopilot(
     """Play `runs` whole real runs unattended, Ironclad at `ascension`, using the fight
     lab's own move player and recording between real fights too (see coach.autopilot).
     """
+    prior_dir = _prior_dir(config, prior)
     client = (
         client_factory or (lambda url, token: ModClient(url, token, timeout_s=LAB_CLIENT_TIMEOUT_S))
     )(config.base_url, config.token)
@@ -497,9 +510,11 @@ def cmd_autopilot(
                 lambda: EngineClient(
                     workers=workers,
                     extra_env={"STS2_STRATEGY_MODEL_DIR": str(autopilot.FULL_RUN_MODEL_DIR)},
+                    prior_dir=prior_dir,
                 )
             )
         )()
+        _say_prior(prior_dir)
         try:
             problems = engine_health_problems(engine, timeout_s=config.engine_start_timeout_s)
             if problems:
@@ -536,6 +551,37 @@ class CoachError(Exception):
     """The live coach could not start. The message is one line for the user."""
 
 
+def combat_prior_dir(config: Config) -> Path:
+    """Where the prior loop exports the combat prior the fight search can play."""
+    return config.data_dir / "models" / "combat_prior"
+
+
+def _prior_dir(config: Config, prior: bool | None) -> Path | None:
+    """The combat prior the engine's fight search plays, or None for the plain search.
+
+    `prior` is --prior (True), --no-prior (False) or neither (None, `DEFAULT_PRIOR`: on
+    when a prior is exported to the data folder, off when none is).
+
+    Raises:
+        CoachError: If --prior asks for a prior and none is exported.
+    """
+    folder = combat_prior_dir(config)
+    exported = (folder / "model.json").is_file() and (folder / "combat_policy.pt").is_file()
+    wanted = prior if prior is not None else DEFAULT_PRIOR
+    if wanted is None:
+        wanted = exported
+    if not wanted:
+        return None
+    if not exported:
+        raise CoachError(f"--prior: no combat prior is exported to {folder}")
+    return folder
+
+
+def _say_prior(prior_dir: Path | None) -> None:
+    if prior_dir is not None:
+        _say(f"The fight search plays the combat prior in {prior_dir}.")
+
+
 def _wait_for_ctrl_c() -> None:
     """Block until Ctrl-C (or SIGTERM or SIGHUP), which raises KeyboardInterrupt here."""
     while True:
@@ -557,6 +603,7 @@ def cmd_coach(
     port: int = DEFAULT_PORT,
     window: bool = True,
     mode: str = "show",
+    prior: bool | None = None,
     engine_cmd: list[str] | None = None,
     client_factory: Callable[[str, str | None], ModClient] | None = None,
     show_window: Callable[[str], bool] | None = None,
@@ -570,8 +617,10 @@ def cmd_coach(
     browser tab away and the coach runs until Ctrl-C. SIGTERM (a plain `kill`) and SIGHUP
     (the terminal closing) stop it as Ctrl-C does. `engine_cmd` replaces the engine
     service's launch command; the last three keywords replace the mod client, the window
-    and the wait for Ctrl-C (tests use stand-ins).
+    and the wait for Ctrl-C (tests use stand-ins). `prior` is --prior/--no-prior: whether
+    the fight search plays the exported combat prior (`_prior_dir`).
     """
+    prior_dir = _prior_dir(config, prior)
     settings = CoachSettings(
         mode=mode,
         time_budget_s=budget_s,
@@ -581,9 +630,10 @@ def cmd_coach(
     with _stop_signals_raise_keyboard_interrupt():
         coach = _LiveCoach(
             (client_factory or ModClient)(config.base_url, config.token),
-            EngineClient(engine_cmd, workers=workers),
+            EngineClient(engine_cmd, workers=workers, prior_dir=prior_dir),
             settings,
         )
+        _say_prior(prior_dir)
         try:
             coach.start(config.data_dir, port)
             url = f"http://{HOST}:{port}/"
@@ -926,6 +976,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default="show",
         help="show the best move at once, or quiz: hide it until you move (default: %(default)s)",
     )
+    _add_prior_option(coach_parser)
 
     dashboard_parser = subparsers.add_parser(
         "dashboard", help="a local page with training progress, the game and the coach"
@@ -1020,6 +1071,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_BUDGET_S,
         help="seconds of search per position (default: %(default)s)",
     )
+    _add_prior_option(lab_parser)
 
     autopilot_parser = subparsers.add_parser(
         "autopilot",
@@ -1095,8 +1147,23 @@ def _build_parser() -> argparse.ArgumentParser:
             "(default: %(default)s)"
         ),
     )
+    _add_prior_option(autopilot_parser)
 
     return parser
+
+
+def _add_prior_option(parser: argparse.ArgumentParser) -> None:
+    default = {
+        None: "on when a combat prior is exported to the data folder, off when none is",
+        True: "on",
+        False: "off",
+    }[DEFAULT_PRIOR]
+    parser.add_argument(
+        "--prior",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=f"let the combat prior guide the fight search (default: {default})",
+    )
 
 
 def _current_operation(args: argparse.Namespace) -> str:
@@ -1138,6 +1205,7 @@ def main(argv: list[str] | None = None) -> int:
                 port=args.port,
                 window=not args.no_window,
                 mode=args.mode,
+                prior=args.prior,
             )
         if args.command == "dashboard":
             return cmd_dashboard(
@@ -1164,6 +1232,7 @@ def main(argv: list[str] | None = None) -> int:
                 buffer_hp=args.buffer_hp,
                 workers=args.workers,
                 budget_s=args.budget,
+                prior=args.prior,
             )
         if args.command == "autopilot":
             return cmd_autopilot(
@@ -1178,6 +1247,7 @@ def main(argv: list[str] | None = None) -> int:
                 auto_kill=args.auto_kill,
                 auto_kill_rounds=args.auto_kill_rounds,
                 fresh_run=args.fresh_run,
+                prior=args.prior,
             )
     except navigator.NavigatorError as exc:
         print(str(exc), file=sys.stderr)

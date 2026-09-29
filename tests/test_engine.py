@@ -77,6 +77,17 @@ def test_default_cmd_workers_defaults_to_four():
     assert client._cmd[-1] == "4"
 
 
+def test_default_cmd_names_the_combat_prior_only_when_given_one(tmp_path):
+    assert "--prior-dir" not in EngineClient()._cmd
+    client = EngineClient(prior_dir=tmp_path)
+    assert client._cmd[-4:] == ["--workers", "4", "--prior-dir", str(tmp_path)]
+    assert EngineClient(cmd=["python", "-c", "pass"], prior_dir=tmp_path)._cmd == [
+        "python",
+        "-c",
+        "pass",
+    ]
+
+
 def test_the_default_launch_runs_in_the_sts2_repo_with_its_sources_on_pythonpath(monkeypatch):
     # The simulator's package is not installed in its own env, so the service only
     # imports when launched from the repo with src/ and rl/ on PYTHONPATH.
