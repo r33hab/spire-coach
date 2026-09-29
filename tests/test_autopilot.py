@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 from fakes.fake_mod import ScriptedMod
 
-from coach import autopilot
+from coach import autopilot, autoplay
 from coach.autoplay import FightOutcome, GameJamError
 from coach.bridge.client import BridgeError
 from coach.engine import EngineError, StrategyResult
@@ -67,6 +67,17 @@ def win_state(state_type="map", hp=50) -> FightOutcome:
 
 def death() -> FightOutcome:
     return FightOutcome(state={"state_type": "game_over", "player": {"hp": 0}}, ok=True, last_hp=0)
+
+
+def stuck(hp=30, floor=7) -> FightOutcome:
+    """A fight MovePlayer gave up on (no progress, auto-kill off or refused): still
+    mid-combat, not game_over -- _play_run must abandon it rather than loop forever."""
+    return FightOutcome(
+        state={"state_type": "monster", "player": {"hp": hp}, "run": {"act": 1, "floor": floor}},
+        ok=False,
+        gave_up=True,
+        last_hp=hp,
+    )
 
 
 def make_mod() -> ScriptedMod:
@@ -272,6 +283,29 @@ def test_no_buffer_by_default(tmp_path):
     assert not any(a.get("action") == "debug_gain_max_hp" for a in mod.posted)
 
 
+def test_run_abandons_a_fight_that_gave_up_and_still_records_the_run(tmp_path):
+    # Task 2 ("stop the HP top-ups and abandon"): a fight MovePlayer gave up on (a wall
+    # like The Insatiable, auto-kill off or refused) must not spin -- _play_run abandons
+    # the run from wherever it got stuck, and it still counts as a real, recorded run
+    # (a death), not a discarded one.
+    mod = make_mod()
+    mod.after_map_choice = "monster"
+    player = ScriptedFightPlayer(mod, [(stuck(hp=30, floor=7), 5)])
+    engine = StubEngine()
+    runlog = RunLog(tmp_path, subdir="runs", prefix="autopilot-")
+
+    summary = autopilot.run(mod, engine, runlog, runs=1, move_player=player)
+
+    assert summary.runs_played == 1
+    assert summary.deaths == 1
+    assert summary.records[0].won is False
+    assert summary.records[0].floor == 7
+    assert summary.records[0].moves == 5
+    # abandoned via leave_run's own return_to_main_menu, not left spinning on "monster"
+    assert {"action": "return_to_main_menu"} in mod.posted
+    assert mod.state_type == "menu"
+
+
 def test_session_header_names_the_autopilot_command_and_settings(tmp_path):
     mod = make_mod()
     mod.after_map_choice = "monster"
@@ -286,6 +320,36 @@ def test_session_header_names_the_autopilot_command_and_settings(tmp_path):
     assert first["payload"]["command"] == "autopilot"
     assert first["payload"]["ascension"] == 15
     assert first["payload"]["buffer_hp"] == 10
+    # Task 5: the buffer, auto-kill and debug settings are all recorded, defaults included.
+    assert first["payload"]["auto_kill"] is True
+    assert first["payload"]["auto_kill_no_progress_rounds"] == (
+        autoplay.DEFAULT_AUTO_KILL_NO_PROGRESS_ROUNDS
+    )
+    assert first["payload"]["allow_debug_actions"] is False
+
+
+def test_session_header_records_auto_kill_and_debug_settings_when_overridden(tmp_path):
+    mod = make_mod()
+    mod.after_map_choice = "monster"
+    player = ScriptedFightPlayer(mod, [(death(), 1)])
+    engine = StubEngine()
+    runlog = RunLog(tmp_path, subdir="runs", prefix="autopilot-")
+
+    autopilot.run(
+        mod,
+        engine,
+        runlog,
+        runs=1,
+        move_player=player,
+        auto_kill=False,
+        auto_kill_no_progress_rounds=3,
+        allow_debug_actions=True,
+    )
+
+    first = json.loads(runlog.path.read_text(encoding="utf-8").splitlines()[0])
+    assert first["payload"]["auto_kill"] is False
+    assert first["payload"]["auto_kill_no_progress_rounds"] == 3
+    assert first["payload"]["allow_debug_actions"] is True
 
 
 class JammingThenNormalPlayer:
@@ -340,7 +404,8 @@ def test_run_restarts_on_jam_when_opted_in(tmp_path):
         mod,
         engine,
         runlog,
-        runs=2,  # the jam consumes one attempt (as any other recovered failure does)
+        runs=2,  # a game jam still consumes one of the runs asked for, unlike a failed
+        # start (task 4): only _start_run's own retries are free
         move_player=player,
         restart_on_jam=True,
         quit_game=lambda: calls.__setitem__("quit", calls["quit"] + 1),
@@ -385,7 +450,65 @@ def test_stuck_run_is_recovered_not_crashed(tmp_path, monkeypatch):
     engine = StubEngine()
     runlog = RunLog(tmp_path, subdir="runs", prefix="autopilot-")
 
+    # _start_run retries this (a NavigatorError, task 4) up to its own default cap of 5
+    # consecutive failed starts -- all against the same always-stuck mod -- before
+    # giving up on the whole autopilot; runs_played stays 0 either way.
     summary = autopilot.run(mod, engine, runlog, runs=1, move_player=player)
 
     assert summary.runs_played == 0  # the stuck run was recovered, not counted
     assert mod.state_type == "menu"  # _recover left it at the main menu
+
+
+# --- run counting (task 4): a failed start must not count, and must not spend the runs
+# budget, but 5 consecutive failures in a row still stops the whole autopilot ----------
+
+
+def test_run_retries_a_phantom_start_and_does_not_count_it(tmp_path, monkeypatch):
+    # Live 2026-09-29 (autopilot-20260929-*.jsonl): a start that silently did not really
+    # embark returns cleanly but with nothing to show for it -- "died on floor None, 0
+    # moves". That must not count as a played run, and the start must be retried for
+    # free (not spending any of the single run asked for here).
+    calls: list[dict | None] = []
+
+    def fake_play_run(client, player, engine, runlog, *, ascension, buffer_hp, stop, resume_state):
+        calls.append(resume_state)
+        if len(calls) == 1:
+            return autopilot.RunRecord(won=False, floor=None, moves=0, acts_reached=1, buffered=False)
+        return autopilot.RunRecord(won=False, floor=5, moves=3, acts_reached=1, buffered=False)
+
+    monkeypatch.setattr(autopilot, "_play_run", fake_play_run)
+    mod = make_mod()
+    engine = StubEngine()
+    runlog = RunLog(tmp_path, subdir="runs", prefix="autopilot-")
+
+    summary = autopilot.run(mod, engine, runlog, runs=1)
+
+    assert summary.runs_played == 1
+    assert summary.records[0].floor == 5
+    assert len(calls) == 2  # the phantom start was retried once, for free
+    error_records = [
+        json.loads(line)
+        for line in runlog.path.read_text(encoding="utf-8").splitlines()
+        if json.loads(line)["kind"] == "error"
+    ]
+    assert any("start failed" in r["payload"]["error"] for r in error_records)
+
+
+def test_run_stops_after_five_consecutive_failed_starts(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_play_run(client, player, engine, runlog, *, ascension, buffer_hp, stop, resume_state):
+        calls.append(1)
+        return autopilot.RunRecord(won=False, floor=None, moves=0, acts_reached=1, buffered=False)
+
+    monkeypatch.setattr(autopilot, "_play_run", fake_play_run)
+    mod = make_mod()
+    engine = StubEngine()
+    runlog = RunLog(tmp_path, subdir="runs", prefix="autopilot-")
+    said = []
+
+    summary = autopilot.run(mod, engine, runlog, runs=3, say=said.append)
+
+    assert summary.runs_played == 0
+    assert len(calls) == 5  # the spec's default: "about 5 consecutive failed starts"
+    assert any("5" in line and "failed start" in line.lower() for line in said)

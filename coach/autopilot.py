@@ -42,6 +42,13 @@ FULL_RUN_MODEL_DIR = (
 )
 _STEP_TIMEOUT_S = 20.0
 _MAX_SCREENS_PER_RUN = 4000  # stuck-safety cap (spec: "a timeout, then recovery")
+# Live 2026-09-29 (autopilot-20260929-002103/002138.jsonl): a start that fails -- "no
+# 'Ironclad' option on character select: []" -- was followed by a run that never really
+# embarked either, recorded as "died on floor None, 0 moves" and counted anyway. Neither
+# should spend one of the runs the user asked for: `_start_run` retries a failed start
+# (an exception, or exactly that zero-progress signature) this many times in a row,
+# without touching `runs`, before giving up on the whole autopilot with a clear message.
+DEFAULT_MAX_CONSECUTIVE_FAILED_STARTS = 5
 
 # --- --restart-on-jam: quit, relaunch, and let the next run's own embark_run abandon
 # the jammed one from the main menu (bug 3/7) ----------------------------------------
@@ -156,6 +163,10 @@ def run(
     quit_game: Callable[[], None] = _quit_game,
     launch_game: Callable[[], None] = _launch_game,
     restart_hello_timeout_s: float = _GAME_HELLO_TIMEOUT_S,
+    auto_kill: bool = True,
+    auto_kill_no_progress_rounds: int = autoplay.DEFAULT_AUTO_KILL_NO_PROGRESS_ROUNDS,
+    allow_debug_actions: bool = False,
+    max_consecutive_failed_starts: int = DEFAULT_MAX_CONSECUTIVE_FAILED_STARTS,
 ) -> AutopilotSummary:
     """Play whole runs until `runs` is reached or `stop()` says otherwise. `move_player`
     is a seam for tests, as in `coach.fightlab.run`.
@@ -166,7 +177,14 @@ def run(
     known to clear it and doing that unasked would be a surprising thing for an
     unattended process to do on its own. `restart_on_jam=True` does it anyway: quits
     the game, relaunches it, and continues with the next run once the mod answers
-    again."""
+    again.
+
+    `auto_kill` (default on) makes a fight that cannot show progress (see
+    `coach.autoplay.MovePlayer`) call `debug_kill_enemy` and keep going instead of
+    ending the run; `allow_debug_actions` is recorded in the session header only (the
+    mod itself is what actually gates every `debug_*` action, so nothing here needs to
+    duplicate that check -- a refused debug action is just a `BridgeError` autoplay
+    already falls back on)."""
     player = move_player or MovePlayer(
         client,
         engine,
@@ -174,6 +192,8 @@ def run(
         time_budget_s=time_budget_s,
         game_version=game_version,
         source="autopilot",
+        no_progress_rounds=auto_kill_no_progress_rounds,
+        auto_kill_no_progress=auto_kill,
     )
     initial_state = client.get_state()
     runlog.append(
@@ -183,6 +203,9 @@ def run(
             "runs": runs,
             "ascension": ascension,
             "buffer_hp": buffer_hp,
+            "auto_kill": auto_kill,
+            "auto_kill_no_progress_rounds": auto_kill_no_progress_rounds,
+            "allow_debug_actions": allow_debug_actions,
             **navigator.session_header(initial_state),
         },
     )
@@ -203,7 +226,7 @@ def run(
                 + (f", buffered +{buffer_hp} hp/fight" if buffer_hp else "")
             )
             try:
-                record = _play_run(
+                record, gave_up = _start_run(
                     client,
                     player,
                     engine,
@@ -212,6 +235,8 @@ def run(
                     buffer_hp=buffer_hp,
                     stop=stop,
                     resume_state=resume_state,
+                    say=say,
+                    max_consecutive_failed_starts=max_consecutive_failed_starts,
                 )
             except autoplay.GameJamError as exc:
                 resume_state = None
@@ -238,13 +263,9 @@ def run(
                     say(f"  could not recover from the jam ({restart_exc}); stopping autopilot")
                     break
                 continue
-            except (BridgeError, navigator.NavigatorError) as exc:
-                resume_state = None
-                say(f"  run failed ({exc}); recovering")
-                runlog.append("error", {"error": f"autopilot: {exc}"})
-                _recover(client)
-                continue
             resume_state = None
+            if gave_up:
+                break
             summary.add(record)
             say(
                 f"  -> {'won' if record.won else 'died'} on floor {record.floor}, "
@@ -253,6 +274,71 @@ def run(
     except KeyboardInterrupt:
         say("autopilot: stopping (Ctrl-C)")
     return summary
+
+
+def _start_run(
+    client: ModClient,
+    player: MovePlayer,
+    engine: EngineClient,
+    runlog: RunLog,
+    *,
+    ascension: int,
+    buffer_hp: int,
+    stop: Callable[[], bool],
+    resume_state: dict | None,
+    say: Callable[[str], None],
+    max_consecutive_failed_starts: int,
+) -> tuple[RunRecord | None, bool]:
+    """Play one run, retrying a failed START up to `max_consecutive_failed_starts` times
+    in a row without spending any of the caller's `runs` budget on them -- unlike a game
+    jam (a separate, mid-fight failure with its own opt-in recovery), which still counts
+    as one of the runs the caller asked for.
+
+    A "failed start" is either `_play_run` raising (live: "no 'Ironclad' option on
+    character select: []", the roster not populated in time) or -- confirmed live right
+    after, autopilot-20260929-*.jsonl -- returning cleanly but with nothing to show for
+    it: 0 moves and no floor reached, the run having silently not really embarked. Both
+    are retried the same way: recover to the main menu and let the next attempt's own
+    `embark_run` (and its `_reach_populated_character_select` wait) try again fresh.
+
+    Returns `(record, gave_up)`: `record` is a real `RunRecord` unless every retry
+    failed, in which case it is None and `gave_up` is True (the caller stops the whole
+    autopilot). `GameJamError` is deliberately not caught here -- it propagates to the
+    caller's own handling."""
+    failed_starts = 0
+    while True:
+        if stop():
+            return None, True
+        try:
+            record = _play_run(
+                client,
+                player,
+                engine,
+                runlog,
+                ascension=ascension,
+                buffer_hp=buffer_hp,
+                stop=stop,
+                resume_state=resume_state,
+            )
+        except (BridgeError, navigator.NavigatorError) as exc:
+            say(f"  run failed ({exc}); recovering")
+            runlog.append("error", {"error": f"autopilot: {exc}"})
+            _recover(client)
+            failed_starts += 1
+        else:
+            if record.moves == 0 and record.floor is None and not record.won:
+                say("  -> start failed (0 moves, no floor reached); retrying")
+                runlog.append(
+                    "error",
+                    {"error": "autopilot: start failed (0 moves, no floor reached); retrying"},
+                )
+                failed_starts += 1
+            else:
+                return record, False
+        if failed_starts >= max_consecutive_failed_starts:
+            say(f"  {failed_starts} failed starts in a row; stopping autopilot")
+            return None, True
+        resume_state = None  # a retry always embarks fresh, even if the first attempt resumed
 
 
 def _play_run(
@@ -295,6 +381,23 @@ def _play_run(
                 return RunRecord(
                     won=won,
                     floor=floor,
+                    moves=player.stats.moves - moves_before,
+                    acts_reached=acts_reached,
+                    buffered=buffered,
+                )
+            if outcome.gave_up:
+                # No progress, and it could not be cleared (auto-kill off, or the mod
+                # refused it -- allow_debug_actions off): a wall like The Insatiable.
+                # Abandon here rather than looping back into the same stuck fight --
+                # this also stops any further HP top-ups, since no further fight in
+                # this run gets the chance to ask for one (spec: "stop the HP top-ups
+                # and abandon"). Still a real, fully recorded run: floor and moves come
+                # from the actual last combat state, not the "left some other way"
+                # None below.
+                navigator.leave_run(client, state)
+                return RunRecord(
+                    won=False,
+                    floor=(state.get("run") or {}).get("floor"),
                     moves=player.stats.moves - moves_before,
                     acts_reached=acts_reached,
                     buffered=buffered,
