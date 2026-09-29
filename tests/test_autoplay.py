@@ -709,3 +709,20 @@ def _no_sleep(monkeypatch):
     import time
 
     monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+
+
+def test_a_card_the_game_marks_unplayable_is_never_sent():
+    # Live (2026-09-29, the Queen): Bound left Strike can_play false; the search, which
+    # doesn't model Bound, kept picking it and the game kept refusing.
+    from types import SimpleNamespace as NS
+
+    from coach.autoplay import playable_choice
+
+    strike = NS(kind="card", card_index=0, visits=50)
+    defend = NS(kind="card", card_index=3, visits=30)
+    end = NS(kind="end_turn", card_index=None, visits=10)
+    state = {"player": {"hand": [{"index": 0, "can_play": False}, {"index": 3, "can_play": True}]}}
+    analysis = NS(best=strike, moves=[strike, defend, end])
+    assert playable_choice(state, analysis) is defend
+    state["player"]["hand"][1]["can_play"] = False
+    assert playable_choice(state, analysis) is end

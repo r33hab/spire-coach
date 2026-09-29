@@ -77,6 +77,27 @@ def in_combat(state: dict) -> bool:
     return state.get("state_type") in COMBAT_STATE_TYPES or bool(state.get("in_combat"))
 
 
+def playable_choice(state: dict, analysis) -> Move:
+    """The search's pick, unless the game itself won't let that card be played.
+
+    An affliction the simulator does not model -- the Queen's Bound (live 2026-09-29) --
+    marks a card `can_play: false`; the autopilot re-sent the search's pick forever while
+    the game refused it. The game's own flag wins: take the most-visited move it allows,
+    else end the turn.
+    """
+    hand = {c.get("index"): c for c in (state.get("player") or {}).get("hand") or []}
+
+    def allowed(move) -> bool:
+        return move.kind != "card" or hand.get(move.card_index, {}).get("can_play", True)
+
+    if allowed(analysis.best):
+        return analysis.best
+    for move in sorted(analysis.moves, key=lambda m: m.visits, reverse=True):
+        if allowed(move):
+            return move
+    return next((m for m in analysis.moves if m.kind == "end_turn"), analysis.best)
+
+
 def move_to_action(move: Move) -> dict | None:
     """One `/api/v1/singleplayer` action for a `coach.engine.Move`. None for a move
     kind the mod has no direct action for (there is none today; kept so a future move
@@ -400,7 +421,7 @@ class MovePlayer:
                 "analysis": dataclasses.asdict(analysis),
             },
         )
-        move = analysis.best
+        move = playable_choice(state, analysis)
         if decision.kind is DecisionKind.COMBAT_SELECT:
             selection = live.get("pending_selection") or {}
             move, action = _selection_step(selection, move)
