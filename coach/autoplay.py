@@ -69,6 +69,13 @@ END_TURN_STALL_THRESHOLD = 2
 # stages, untargetable, an attack was re-sent 100+ times from one position, and no round
 # passed for the no-progress check to notice.
 IGNORED_MOVE_THRESHOLD = 2
+# The power-up that ends a fight this player cannot win (`_post_debug_empower`): with
+# this much Strength the next attacks simply kill, through the game's own death, revive
+# and stage flow.
+EMPOWER_STRENGTH = 999
+# The Insatiable's Sandpit counts down each turn and kills the player outright at zero,
+# whatever the hp: power up once it is this close, while there are still turns to attack.
+SANDPIT_EMPOWER_AT = 2
 # Bug 3/7: confirmed live twice tonight (Ovicopter and, in this same session, a second
 # fight) -- is_resolving stuck true, the play phase reported true, cards marked
 # can_play, yet the game refused all input, even a manual click; only a full game
@@ -392,6 +399,8 @@ class MovePlayer:
         last_round_checked: int | None = None
         end_turn_stalls = 0  # consecutive end_turn sends with no round/turn change
         ignored: dict[tuple[str, Move], int] = {}  # (position, move) -> times ignored
+        last_lineup: tuple | None = None  # (name, max hp) per enemy at the last round check
+        empowered = False
         refused: dict[str, set[Move]] = {}  # position -> moves skipped there
         for _ in range(max_moves):
             if (hp := _hp_of(state)) is not None:
@@ -430,18 +439,43 @@ class MovePlayer:
                 if isinstance(round_, int) and round_ != last_round_checked:
                     last_round_checked = round_
                     hp = _total_enemy_hp(state)
-                    if best_enemy_hp == 0 and hp > 0:
-                        # A next stage revived (Test Subject, live 2026-09-29): its fresh
-                        # hp can never beat the 0 its last stage died at, so count anew.
+                    lineup = _enemy_lineup(state)
+                    if lineup != last_lineup or (best_enemy_hp == 0 and hp > 0):
+                        # A next stage or a different set of enemies: its fresh hp can't
+                        # be measured against the last stage's low, so count anew. Live
+                        # 2026-09-29 (autopilot-20260929-224120.jsonl): Test Subject's
+                        # stages of 111, 212 and 313 max hp, fought down to 15, then 16,
+                        # read as 9 rounds without progress, and the boss was force-killed.
                         best_enemy_hp, stalled_rounds = hp, 0
                     elif best_enemy_hp is None or hp < best_enemy_hp:
                         best_enemy_hp, stalled_rounds = hp, 0
                     else:
                         stalled_rounds += 1
+                    last_lineup = lineup
+                    if (
+                        self._auto_kill_no_progress
+                        and not empowered
+                        and _sandpit_closing(state)
+                        and self._post_debug_empower(reason="sandpit")
+                    ):
+                        empowered = True
                     if stalled_rounds > self._no_progress_rounds:
                         if pending is not None:
                             self._resolve_check(pending, None, None, comparable=False)
                             pending = None
+                        if (
+                            self._auto_kill_no_progress
+                            and not empowered
+                            and self._post_debug_empower(reason="no_progress")
+                        ):
+                            # The power-up first: the fight then ends through the game's
+                            # own flow. A forced kill of a reviving boss froze the game.
+                            empowered = True
+                            best_enemy_hp, stalled_rounds, last_round_checked = None, 0, None
+                            state = wait_settled(
+                                self._client, timeout_s=self._settle_timeout_s, poll_s=self._poll_s
+                            )
+                            continue
                         if self._auto_kill_no_progress and self._post_debug_kill_enemy(
                             reason="no_progress"
                         ):
@@ -594,6 +628,25 @@ class MovePlayer:
         self.stats.moves += 1
         return live, move
 
+    def _post_debug_empower(self, *, reason: str) -> bool:
+        """Give the player `EMPOWER_STRENGTH` Strength through the mod (STS2MCP
+        `debug_add_power`), so a fight this player cannot win ends through the game's own
+        death, revive and stage flow: the next attacks simply kill. Tried before
+        `debug_kill_enemy`, whose forced kill of a reviving boss froze the game live
+        (Test Subject, 2026-09-29). Posted with `wait=False` like the kill, and logged as
+        a "debug" session record; a `BridgeError` (debug actions off) is logged and
+        reported as failure."""
+        action = {"action": "debug_add_power", "power": "STRENGTH_POWER", "amount": EMPOWER_STRENGTH}
+        try:
+            self._client.post_action(action, wait=False)
+        except BridgeError as exc:
+            self._runlog.append(
+                "error", {"error": f"autoplay: debug_add_power failed ({reason}): {exc}"}
+            )
+            return False
+        self._runlog.append("debug", {**action, "reason": reason})
+        return True
+
     def _post_debug_kill_enemy(self, *, reason: str) -> bool:
         """Kill every living enemy through the mod's own command path (STS2MCP
         McpMod.Debug.cs `ExecuteDebugKillEnemy` -> `CreatureCmd.Kill`), so a fight this
@@ -742,6 +795,28 @@ class MovePlayer:
 def _hp_of(state: dict) -> int | None:
     hp = (state.get("player") or {}).get("hp")
     return hp if isinstance(hp, int) and not isinstance(hp, bool) else None
+
+
+def _enemy_lineup(state: dict) -> tuple:
+    """Who is being fought, as (name, max hp) per enemy: a change marks a next stage (a
+    revive at a new max hp) or a different set of enemies."""
+    enemies = (state.get("battle") or {}).get("enemies") or []
+    return tuple(sorted((str(e.get("name")), e.get("max_hp") or 0) for e in enemies))
+
+
+def _sandpit_closing(state: dict) -> bool:
+    """The Insatiable's Sandpit (`SANDPIT_POWER` on the enemy) is at most
+    `SANDPIT_EMPOWER_AT` turns from killing the player outright."""
+    for enemy in (state.get("battle") or {}).get("enemies") or []:
+        for power in enemy.get("status") or []:
+            amount = power.get("amount")
+            if (
+                power.get("id") == "SANDPIT_POWER"
+                and isinstance(amount, int)
+                and amount <= SANDPIT_EMPOWER_AT
+            ):
+                return True
+    return False
 
 
 def _total_enemy_hp(state: dict) -> int:

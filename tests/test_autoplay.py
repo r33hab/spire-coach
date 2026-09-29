@@ -571,26 +571,20 @@ def test_play_fight_gives_up_on_no_progress_past_the_round_cap(tmp_path):
     assert not any(r["kind"] == "debug" for r in records(runlog))  # never attempted
 
 
-def test_play_fight_auto_kills_on_no_progress_and_keeps_fighting_the_next_stage(tmp_path):
-    # Spec 2026-09-29 ("kill the enemy it can't beat so it always progresses"): the same
-    # wall as the test above, but with auto_kill_no_progress on. Round 5 still trips the
-    # cap, but instead of giving up, debug_kill_enemy is sent and the fight keeps going
-    # against whatever follows -- here a fresh-hp "next stage" that then wins normally,
-    # exactly like a multi-stage boss.
+def test_play_fight_powers_up_on_no_progress_and_keeps_fighting(tmp_path):
+    # With auto_kill_no_progress on, round 5 trips the cap; the first answer is the
+    # power-up (debug_add_power STRENGTH_POWER 999), not a forced kill -- live 2026-09-29
+    # a forced kill of a reviving boss froze the game -- and the fight goes on.
     states = [
         *[combat_round(r, 50, seq=r) for r in range(1, 6)],  # rounds 1-5, stalled at 50
-        combat_round(1, 80, seq=100),  # the next stage: fresh hp, round resets to 1
+        combat_round(6, 30, seq=6),
         rewards(),
     ]
     bridge = ScriptedBridge(states)
     engine = ScriptedEngine([END_TURN])
     runlog = RunLog(tmp_path, subdir="runs", prefix="test-")
     player = MovePlayer(
-        bridge,
-        engine,
-        runlog,
-        game_version="v0.107.1",
-        no_progress_rounds=3,
+        bridge, engine, runlog, game_version="v0.107.1", no_progress_rounds=3,
         auto_kill_no_progress=True,
     )
 
@@ -598,14 +592,77 @@ def test_play_fight_auto_kills_on_no_progress_and_keeps_fighting_the_next_stage(
 
     assert outcome.ok is True
     assert outcome.gave_up is False
-    assert outcome.state["state_type"] == "rewards"
-    assert bridge.posted == (
-        [{"action": "end_turn"}] * 4
-        + [{"action": "debug_kill_enemy"}]
-        + [{"action": "end_turn"}]
-    )
+    assert bridge.posted == [{"action": "end_turn"}] * 4 + [{"action": "debug_add_power", "power": "STRENGTH_POWER", "amount": 999}] + [{"action": "end_turn"}] * 2
     debug_records = [r["payload"] for r in records(runlog) if r["kind"] == "debug"]
-    assert debug_records == [{"action": "debug_kill_enemy", "reason": "no_progress"}]
+    assert debug_records == [{**{"action": "debug_add_power", "power": "STRENGTH_POWER", "amount": 999}, "reason": "no_progress"}]
+
+
+def test_play_fight_kills_as_a_last_resort_when_the_power_up_does_not_help(tmp_path):
+    # Still no progress after the power-up: the forced kill is the last resort, and the
+    # fight keeps going against whatever follows.
+    states = [*[combat_round(r, 50, seq=r) for r in range(1, 11)], rewards()]
+    bridge = ScriptedBridge(states)
+    engine = ScriptedEngine([END_TURN])
+    runlog = RunLog(tmp_path, subdir="runs", prefix="test-")
+    player = MovePlayer(
+        bridge, engine, runlog, game_version="v0.107.1", no_progress_rounds=3,
+        auto_kill_no_progress=True,
+    )
+
+    outcome = player.play_fight(bridge.get_state())
+
+    assert outcome.ok is True
+    assert bridge.posted == (
+        [{"action": "end_turn"}] * 4 + [{"action": "debug_add_power", "power": "STRENGTH_POWER", "amount": 999}] + [{"action": "end_turn"}] * 4
+        + [{"action": "debug_kill_enemy"}] + [{"action": "end_turn"}]
+    )
+
+
+def test_play_fight_does_not_call_a_next_stage_no_progress(tmp_path):
+    # Live (autopilot-20260929-224120.jsonl, floor 49): Test Subject's stages of 111, 212
+    # and 313 max hp, each fought down, but 16 never beat stage 1's 15 -- 9 rounds of "no
+    # progress" and a forced kill that froze the game. A new max hp starts a new count.
+    stages = [(111, [111, 101, 95, 15]), (212, [212, 97, 16]), (313, [313, 312, 179, 179, 132])]
+    states = []
+    for max_hp, hps in stages:
+        for hp in hps:
+            state = combat_round(len(states) + 1, hp, seq=len(states) + 1)
+            state["battle"]["enemies"][0]["max_hp"] = max_hp
+            states.append(state)
+    bridge = ScriptedBridge([*states, rewards()])
+    engine = ScriptedEngine([END_TURN])
+    runlog = RunLog(tmp_path, subdir="runs", prefix="test-")
+    player = MovePlayer(bridge, engine, runlog, game_version="v0.107.1", no_progress_rounds=3)
+
+    outcome = player.play_fight(bridge.get_state())
+
+    assert outcome.ok is True
+    assert not any(
+        "no progress" in r["payload"].get("error", "") for r in records(runlog) if r["kind"] == "error"
+    )
+
+
+def test_play_fight_powers_up_before_the_insatiables_sandpit_closes(tmp_path):
+    # The Insatiable's Sandpit counts down and then kills outright, whatever the hp: the
+    # buffer can't save the run and the no-progress cap (8 rounds) comes too late.
+    state = combat_round(1, 300, seq=1)
+    state["battle"]["enemies"][0]["status"] = [
+        {"id": "SANDPIT_POWER", "name": "Sandpit", "amount": 2, "type": "Buff",
+         "description": "", "keywords": []}
+    ]
+    bridge = ScriptedBridge([state, rewards()])
+    engine = ScriptedEngine([END_TURN])
+    runlog = RunLog(tmp_path, subdir="runs", prefix="test-")
+    player = MovePlayer(
+        bridge, engine, runlog, game_version="v0.107.1", auto_kill_no_progress=True
+    )
+
+    outcome = player.play_fight(bridge.get_state())
+
+    assert outcome.ok is True
+    assert bridge.posted == [{"action": "debug_add_power", "power": "STRENGTH_POWER", "amount": 999}, {"action": "end_turn"}]
+    debug_records = [r["payload"] for r in records(runlog) if r["kind"] == "debug"]
+    assert debug_records == [{**{"action": "debug_add_power", "power": "STRENGTH_POWER", "amount": 999}, "reason": "sandpit"}]
 
 
 def test_play_fight_falls_back_to_giving_up_when_auto_kill_is_refused(tmp_path):
@@ -613,6 +670,7 @@ def test_play_fight_falls_back_to_giving_up_when_auto_kill_is_refused(tmp_path):
     # cannot be won, so this must fall back to the plain give-up, not crash or spin.
     states = [combat_round(r, 50, seq=r) for r in range(1, 6)]
     bridge = ScriptedBridge(states)
+    bridge.raise_on["debug_add_power"] = BridgeError("debug actions disabled")
     bridge.raise_on["debug_kill_enemy"] = BridgeError("debug actions disabled")
     engine = ScriptedEngine([END_TURN])
     runlog = RunLog(tmp_path, subdir="runs", prefix="test-")
@@ -761,7 +819,7 @@ def test_auto_kill_is_posted_without_waiting_for_the_game_to_settle(tmp_path):
     # autopilot abandoned runs whose wall it had just cleared.
     class SlowSettleBridge(ScriptedBridge):
         def post_action(self, action, **kwargs):
-            if action.get("action") == "debug_kill_enemy" and kwargs.get("wait", True):
+            if str(action.get("action")).startswith("debug_") and kwargs.get("wait", True):
                 self.posted.append(action)
                 raise BridgeError("mod did not respond within 10.0s: is the game busy or paused?")
             return super().post_action(action, **kwargs)
@@ -779,7 +837,7 @@ def test_auto_kill_is_posted_without_waiting_for_the_game_to_settle(tmp_path):
 
     assert outcome.gave_up is False
     assert outcome.ok is True
-    assert {"action": "debug_kill_enemy"} in bridge.posted
+    assert {"action": "debug_add_power", "power": "STRENGTH_POWER", "amount": 999} in bridge.posted
 
 
 # --- a move the game keeps ignoring (Test Subject between stages, live 2026-09-29) -----
