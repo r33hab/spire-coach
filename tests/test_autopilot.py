@@ -512,3 +512,29 @@ def test_run_stops_after_five_consecutive_failed_starts(tmp_path, monkeypatch):
     assert summary.runs_played == 0
     assert len(calls) == 5  # the spec's default: "about 5 consecutive failed starts"
     assert any("5" in line and "failed start" in line.lower() for line in said)
+
+
+def test_fresh_run_leaves_a_saved_run_before_starting(tmp_path, monkeypatch):
+    # Live (2026-09-29): restarts resumed the same saved run, straight back into the
+    # same stuck Lagavulin Matriarch fight.
+    from coach import navigator
+
+    left = []
+    monkeypatch.setattr(
+        navigator, "leave_run", lambda client, state, **kw: left.append(state) or {"state_type": "menu"}
+    )
+    played = []
+    record = autopilot.RunRecord(won=False, floor=1, moves=1, acts_reached=1, buffered=False)
+    monkeypatch.setattr(
+        autopilot,
+        "_start_run",
+        lambda *a, **kw: (played.append(kw.get("resume_state")), (record, False))[1],
+    )
+
+    class Client:
+        def get_state(self):
+            return {"state_type": "monster", "run": {"act": 1, "floor": 17}}
+
+    runlog = RunLog(tmp_path, subdir="runs", prefix="test-")
+    autopilot.run(Client(), object(), runlog, runs=1, move_player=object(), fresh_run=True)
+    assert left and played == [None]  # left the saved run, then embarked fresh

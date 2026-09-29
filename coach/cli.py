@@ -476,6 +476,7 @@ def cmd_autopilot(
     auto_kill_rounds: int = autoplay.DEFAULT_AUTO_KILL_NO_PROGRESS_ROUNDS,
     client_factory: Callable[[str, str | None], ModClient] | None = None,
     engine_factory: Callable[[], EngineClient] | None = None,
+    fresh_run: bool = False,
 ) -> int:
     """Play `runs` whole real runs unattended, Ironclad at `ascension`, using the fight
     lab's own move player and recording between real fights too (see coach.autopilot).
@@ -521,6 +522,7 @@ def cmd_autopilot(
                 auto_kill=auto_kill,
                 auto_kill_no_progress_rounds=auto_kill_rounds,
                 allow_debug_actions=read_allow_debug_actions(config.mods_dir),
+                fresh_run=fresh_run,
             )
             _say(summary.format())
         finally:
@@ -1080,6 +1082,11 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     autopilot_parser.add_argument(
+        "--fresh-run",
+        action="store_true",
+        help="abandon any saved run at start and begin a new seed (default: resume it)",
+    )
+    autopilot_parser.add_argument(
         "--auto-kill-rounds",
         type=int,
         default=autoplay.DEFAULT_AUTO_KILL_NO_PROGRESS_ROUNDS,
@@ -1170,6 +1177,7 @@ def main(argv: list[str] | None = None) -> int:
                 restart_on_jam=args.restart_on_jam,
                 auto_kill=args.auto_kill,
                 auto_kill_rounds=args.auto_kill_rounds,
+                fresh_run=args.fresh_run,
             )
     except navigator.NavigatorError as exc:
         print(str(exc), file=sys.stderr)

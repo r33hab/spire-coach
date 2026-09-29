@@ -167,6 +167,7 @@ def run(
     auto_kill_no_progress_rounds: int = autoplay.DEFAULT_AUTO_KILL_NO_PROGRESS_ROUNDS,
     allow_debug_actions: bool = False,
     max_consecutive_failed_starts: int = DEFAULT_MAX_CONSECUTIVE_FAILED_STARTS,
+    fresh_run: bool = False,
 ) -> AutopilotSummary:
     """Play whole runs until `runs` is reached or `stop()` says otherwise. `move_player`
     is a seam for tests, as in `coach.fightlab.run`.
@@ -215,6 +216,12 @@ def run(
     # for a main menu that was never coming. Only the first of `runs` can possibly
     # resume a run already in progress; every run after that really did just end, back
     # at the main menu, and embarks fresh as before.
+    if fresh_run and initial_state.get("state_type") != "menu":
+        # Restarts kept resuming the same saved run, straight back into the same stuck
+        # fight (live, 2026-09-29): leave it for the menu, where the first run's
+        # embark_run abandons it and starts a new seed.
+        say("  --fresh-run: leaving the saved run for a new seed")
+        initial_state = navigator.leave_run(client, initial_state)
     resume_state = initial_state if initial_state.get("state_type") != "menu" else None
     summary = AutopilotSummary()
     try:
