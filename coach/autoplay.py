@@ -63,6 +63,12 @@ DEFAULT_AUTO_KILL_NO_PROGRESS_ROUNDS = 8
 # (spec: a multi-stage boss's first stage dying left end_turn ignored 10 times in a row
 # live, 2026-09-29, while a manual click worked) before autoplay tries to recover it.
 END_TURN_STALL_THRESHOLD = 2
+# How many times the game may ignore the same card/potion move from the same position
+# (its fingerprint unchanged afterwards) before autoplay skips that move there. Live
+# 2026-09-29 (autopilot-20260929-192630.jsonl): with Test Subject at 0 hp between
+# stages, untargetable, an attack was re-sent 100+ times from one position, and no round
+# passed for the no-progress check to notice.
+IGNORED_MOVE_THRESHOLD = 2
 # Bug 3/7: confirmed live twice tonight (Ovicopter and, in this same session, a second
 # fight) -- is_resolving stuck true, the play phase reported true, cards marked
 # can_play, yet the game refused all input, even a manual click; only a full game
@@ -90,17 +96,20 @@ def in_combat(state: dict) -> bool:
     return state.get("state_type") in COMBAT_STATE_TYPES or bool(state.get("in_combat"))
 
 
-def playable_choice(state: dict, analysis) -> Move:
+def playable_choice(state: dict, analysis, refused: frozenset | set = frozenset()) -> Move:
     """The search's pick, unless the game itself won't let that card be played.
 
     An affliction the simulator does not model -- the Queen's Bound (live 2026-09-29) --
     marks a card `can_play: false`; the autopilot re-sent the search's pick forever while
     the game refused it. The game's own flag wins: take the most-visited move it allows,
-    else end the turn.
+    else end the turn. `refused` holds moves the game already ignored from this very
+    position (`IGNORED_MOVE_THRESHOLD`), which are skipped the same way.
     """
     hand = {c.get("index"): c for c in (state.get("player") or {}).get("hand") or []}
 
     def allowed(move) -> bool:
+        if refused and _plain_move(move) in refused:
+            return False
         return move.kind != "card" or hand.get(move.card_index, {}).get("can_play", True)
 
     if allowed(analysis.best):
@@ -108,8 +117,21 @@ def playable_choice(state: dict, analysis) -> Move:
     for move in sorted(analysis.moves, key=lambda m: m.visits, reverse=True):
         if allowed(move):
             return _plain_move(move)
-    fallback = next((m for m in analysis.moves if m.kind == "end_turn"), analysis.best)
-    return _plain_move(fallback)
+    fallback = next((m for m in analysis.moves if m.kind == "end_turn"), None)
+    return _END_TURN if fallback is None else _plain_move(fallback)
+
+
+_END_TURN = Move(
+    kind="end_turn",
+    card_index=None,
+    card_uid=None,
+    card_id=None,
+    potion_slot=None,
+    potion_id=None,
+    target=None,
+    select_index=None,
+    label="End turn",
+)
 
 
 def _plain_move(move):
@@ -364,6 +386,8 @@ class MovePlayer:
         stalled_rounds = 0
         last_round_checked: int | None = None
         end_turn_stalls = 0  # consecutive end_turn sends with no round/turn change
+        ignored: dict[tuple[str, Move], int] = {}  # (position, move) -> times ignored
+        refused: dict[str, set[Move]] = {}  # position -> moves skipped there
         for _ in range(max_moves):
             if (hp := _hp_of(state)) is not None:
                 last_hp = hp
@@ -438,7 +462,7 @@ class MovePlayer:
             if pending is not None:
                 self._resolve_check(pending, state, key, comparable=True)
                 pending = None
-            outcome = self._act(state, decision, key)
+            outcome = self._act(state, decision, key, refused.get(key, frozenset()))
             if outcome is None:
                 return FightOutcome(state=state, ok=False, last_hp=last_hp)
             live, move = outcome
@@ -446,6 +470,18 @@ class MovePlayer:
             state = wait_settled(
                 self._client, timeout_s=self._settle_timeout_s, poll_s=self._poll_s
             )
+            if move.kind != "end_turn" and in_combat(state) and fingerprint(state) == key:
+                plain = _plain_move(move)
+                ignored[(key, plain)] = ignored.get((key, plain), 0) + 1
+                if ignored[(key, plain)] == IGNORED_MOVE_THRESHOLD:
+                    refused.setdefault(key, set()).add(plain)
+                    self._runlog.append(
+                        "error",
+                        {
+                            "error": f"autoplay: the game ignored {plain.label!r} "
+                            f"{IGNORED_MOVE_THRESHOLD} times from this position; skipping it"
+                        },
+                    )
             if move.kind == "end_turn" and in_combat(state):
                 post_battle = state.get("battle") or {}
                 post_signature = (post_battle.get("round"), post_battle.get("turn"))
@@ -484,7 +520,13 @@ class MovePlayer:
             },
         )
 
-    def _act(self, state: dict, decision: Decision, key: str) -> tuple[dict, Move] | None:
+    def _act(
+        self,
+        state: dict,
+        decision: Decision,
+        key: str,
+        refused: frozenset | set = frozenset(),
+    ) -> tuple[dict, Move] | None:
         room_type = self._room_type_for(decision)
         try:
             live = build_live_snapshot(
@@ -509,7 +551,7 @@ class MovePlayer:
                 "analysis": dataclasses.asdict(analysis),
             },
         )
-        move = playable_choice(state, analysis)
+        move = playable_choice(state, analysis, refused)
         if decision.kind is DecisionKind.COMBAT_SELECT:
             selection = live.get("pending_selection") or {}
             move, action = _selection_step(selection, move)

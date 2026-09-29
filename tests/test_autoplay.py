@@ -692,6 +692,29 @@ def test_play_fight_gives_up_after_max_moves(tmp_path):
     assert any("3 moves" in r["payload"]["error"] for r in error_records)
 
 
+# --- a move the game keeps ignoring (Test Subject between stages, live 2026-09-29) -----
+
+
+def test_play_fight_skips_a_move_the_game_keeps_ignoring_and_ends_the_turn(tmp_path):
+    # Live (autopilot-20260929-192630.jsonl, floor 48): the only enemy, Test Subject, sat
+    # at 0 hp waiting to revive, untargetable, and the game ignored the search's Anger
+    # 100+ times from one unchanged position -- no round passed, so the no-progress check
+    # never ran. Ignored twice from the same position, a move is skipped there; with no
+    # other move offered, the turn ends, which moves the fight on.
+    states = [combat(seq=1), combat(seq=1), combat(seq=1), rewards()]
+    bridge = ScriptedBridge(states)
+    engine = ScriptedEngine([card_move()])
+    runlog = RunLog(tmp_path, subdir="runs", prefix="test-")
+    player = MovePlayer(bridge, engine, runlog, game_version="v0.107.1")
+
+    outcome = player.play_fight(bridge.get_state())
+
+    assert outcome.ok is True
+    assert [a["action"] for a in bridge.posted] == ["play_card", "play_card", "end_turn"]
+    error_records = [r for r in records(runlog) if r["kind"] == "error"]
+    assert any("ignored" in r["payload"]["error"] for r in error_records)
+
+
 # --- end-turn stall recovery (a multi-stage boss's first stage dying, live 2026-09-29) --
 
 
