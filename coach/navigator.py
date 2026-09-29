@@ -421,7 +421,13 @@ def advance_one_step(client: ModClient, state: dict, *, runlog: RunLog | None = 
         )
     if state_type == "rewards":
         items = (state.get("rewards") or {}).get("items") or []
-        take = [item for item in items if item.get("type") in _TAKEABLE_REWARD_TYPES]
+        full = potion_belt_full(state)
+        take = [
+            item
+            for item in items
+            if item.get("type") in _TAKEABLE_REWARD_TYPES
+            and not (full and item.get("type") == "potion")
+        ]
         _try(client, {"action": "claim_reward", "index": take[0]["index"]}) if take else _try(
             client, {"action": "proceed"}
         )
@@ -508,6 +514,15 @@ def _advance_crystal_sphere(client: ModClient, state: dict) -> None:
         _try(client, {"action": "crystal_sphere_click_cell", "x": cell.get("x"), "y": cell.get("y")})
     else:
         _try(client, {"action": "crystal_sphere_proceed"})
+
+
+def potion_belt_full(state: dict) -> bool:
+    """Every potion slot is filled: a potion reward then can't be claimed, and trying
+    again forever stalled the autopilot on a rewards screen (live, 2026-09-29)."""
+    player = state.get("player") or {}
+    slots = player.get("max_potion_slots") or player.get("potion_slots")
+    held = [p for p in player.get("potions") or [] if p and (not isinstance(p, dict) or p.get("id"))]
+    return isinstance(slots, int) and len(held) >= slots
 
 
 def _select_first_card(client: ModClient, state: dict) -> None:

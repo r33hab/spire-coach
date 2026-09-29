@@ -653,3 +653,12 @@ def test_advance_one_step_without_a_runlog_still_works(tmp_path):
     mod.state_type = "some_new_screen_this_module_has_never_seen"
     advance_one_step(mod, mod.get_state())  # must not raise
     assert {"action": "proceed"} in mod.posted
+
+
+def test_rewards_skip_a_potion_when_the_belt_is_full_and_proceed():
+    state = {"state_type": "rewards", "player": {"potions": ["FOUL_POTION", "FOUL_POTION"], "max_potion_slots": 2},
+             "rewards": {"items": [{"index": 0, "type": "potion"}], "can_proceed": True}}
+    client = _SequencedClient([state])
+    navigator.advance_one_step(client, state)
+    assert {"action": "proceed"} in client.posted
+    assert not any(a.get("action") == "claim_reward" for a in client.posted)

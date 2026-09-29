@@ -172,6 +172,8 @@ def _claim_reward(client: ModClient, state: dict, kind: str) -> bool:
     simulator knows (only Ironclad's card pool is bigger with them enabled)."""
     items = (state.get("rewards") or {}).get("items") or []
     wanted = {"reward.potion": "potion", "reward.relic": "relic"}[kind]
+    if wanted == "potion" and navigator.potion_belt_full(state):
+        return False  # can't be claimed: the fallback skips it and proceeds
     item = next((i for i in items if i.get("type") == wanted), None)
     if item is None or "index" not in item:
         return False

@@ -215,3 +215,13 @@ def test_neows_own_relic_screen_still_uses_select_relic():
     client = FakeClient()
     execute_best_option(client, {"state_type": "relic_select"}, result_for("neow.relic", action=0))
     assert client.posted == [{"action": "select_relic", "index": 0}]
+
+
+def test_a_potion_reward_with_a_full_belt_is_left_to_the_fallback():
+    # Live (2026-09-29, floor 39): a Foul Potion reward with both slots full; claiming
+    # it again and again stalled the rewards screen.
+    state = {"state_type": "rewards", "player": {"potions": ["FOUL_POTION", "FOUL_POTION"], "max_potion_slots": 2},
+             "rewards": {"items": [{"index": 0, "type": "potion"}], "can_proceed": True}}
+    client = FakeClient()
+    assert execute_best_option(client, state, result_for("reward.potion")) is False
+    assert client.posted == []
