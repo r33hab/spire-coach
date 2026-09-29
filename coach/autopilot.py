@@ -370,6 +370,7 @@ def _play_run(
     moves_before = player.stats.moves
     acts_reached = navigator.act_of(state) or 1
     tracker = LiveRunTracker()
+    event_guard = EventLoopGuard()
     for _ in range(_MAX_SCREENS_PER_RUN):
         if stop():
             break
@@ -420,15 +421,65 @@ def _play_run(
                 acts_reached=acts_reached,
                 buffered=buffered,
             )
-        _play_screen(client, engine, tracker, state, runlog)
+        _play_screen(client, engine, tracker, state, runlog, event_guard)
     raise navigator.NavigatorError(
         f"autopilot: {_MAX_SCREENS_PER_RUN} screens without the run ending"
     )
 
 
+class EventLoopGuard:
+    """Leave an event whose page keeps coming back with the same options.
+
+    Live (2026-09-29, Abyssal Baths): LINGER returns the same two options (Linger / Exit
+    Baths) with damage rising by one each time, and Linger kept being picked -- an 8,000
+    hp buffer makes it look like free max hp -- until it killed the run. The same event
+    page offered with the same options `limit` screens in a row is a loop: take the last
+    open option (the way out) instead of asking again.
+    """
+
+    def __init__(self, limit: int = 3) -> None:
+        self.limit = limit
+        self._page: tuple | None = None
+        self._seen = 0
+
+    def way_out(self, state: dict) -> dict | None:
+        event = state.get("event") or {}
+        options = event.get("options") or []
+        if state.get("state_type") != "event" or not options:
+            self._page, self._seen = None, 0
+            return None
+        page = (event.get("event_id"), tuple(o.get("text_key") or o.get("title") for o in options))
+        self._seen = self._seen + 1 if page == self._page else 1
+        self._page = page
+        open_options = [o for o in options if not o.get("is_locked")]
+        if self._seen >= self.limit and len(open_options) >= 2:
+            return open_options[-1]
+        return None
+
+
 def _play_screen(
-    client: ModClient, engine: EngineClient, tracker: LiveRunTracker, state: dict, runlog: RunLog
+    client: ModClient,
+    engine: EngineClient,
+    tracker: LiveRunTracker,
+    state: dict,
+    runlog: RunLog,
+    event_guard: EventLoopGuard | None = None,
 ) -> None:
+    way_out = event_guard.way_out(state) if event_guard is not None else None
+    if way_out is not None:
+        event_id = (state.get("event") or {}).get("event_id")
+        runlog.append(
+            "error",
+            {
+                "error": f"autopilot: event {event_id} offered the same options "
+                f"{event_guard.limit} times in a row; taking {way_out.get('title')!r} out"
+            },
+        )
+        try:
+            client.post_action({"action": "choose_event_option", "index": way_out.get("index", 0)})
+            return
+        except BridgeError:
+            pass
     if state.get("state_type") == "map" and _has_one_map_option(state):
         # No real decision to make (and one less round trip through the strategy
         # service that can fail with things like "NotReadyError: the current map

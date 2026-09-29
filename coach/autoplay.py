@@ -35,7 +35,7 @@ from coach.bridge.decisions import (
 )
 from coach.engine import EngineClient, EngineError, Move, MoveStat
 from coach.runlog import RunLog
-from coach.snapshot import SnapshotError, build_live_snapshot
+from coach.snapshot import SnapshotError, build_live_snapshot, build_pending_selection
 
 DEFAULT_SETTLE_TIMEOUT_S = 20.0
 DEFAULT_POLL_S = 0.3
@@ -425,7 +425,11 @@ class MovePlayer:
                 if isinstance(round_, int) and round_ != last_round_checked:
                     last_round_checked = round_
                     hp = _total_enemy_hp(state)
-                    if best_enemy_hp is None or hp < best_enemy_hp:
+                    if best_enemy_hp == 0 and hp > 0:
+                        # A next stage revived (Test Subject, live 2026-09-29): its fresh
+                        # hp can never beat the 0 its last stage died at, so count anew.
+                        best_enemy_hp, stalled_rounds = hp, 0
+                    elif best_enemy_hp is None or hp < best_enemy_hp:
                         best_enemy_hp, stalled_rounds = hp, 0
                     else:
                         stalled_rounds += 1
@@ -534,6 +538,16 @@ class MovePlayer:
             )
         except SnapshotError as exc:
             self._runlog.append("analysis", {"fingerprint": key, "error": f"snapshot: {exc}"})
+            if decision.kind is DecisionKind.COMBAT_SELECT:
+                # Live (autopilot-20260929-210325.jsonl): a pile pick left open after the
+                # last enemy died. The full snapshot refuses a fight with no enemy, but
+                # the screen's own selection rules can still answer it.
+                try:
+                    selection = build_pending_selection(state)
+                except SnapshotError:
+                    selection = None
+                if selection is not None:
+                    self._fallback_selection({"pending_selection": selection})
             return None
         try:
             analysis = self._engine.analyze(live, time_budget_s=self._time_budget_s)

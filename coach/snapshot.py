@@ -815,6 +815,22 @@ def _build_pending_selection(
 # ---------------------------------------------------------------------------
 
 
+def build_pending_selection(state: dict) -> dict | None:
+    """The snapshot's `pending_selection` alone, for a selection screen the full snapshot
+    refuses (live 2026-09-29: a pile pick left open after the last enemy died). None off
+    a selection screen."""
+    state_type = state.get("state_type")
+    if state_type not in _SELECTION_STATE_TYPES:
+        return None
+    return _build_pending_selection(
+        state,
+        state_type=state_type,
+        player=_require_dict(state, "player", "player"),
+        mod_warnings=state.get("warnings") or [],
+        warnings=[],
+    )
+
+
 def build_live_snapshot(
     state: dict,
     *,

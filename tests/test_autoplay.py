@@ -692,6 +692,54 @@ def test_play_fight_gives_up_after_max_moves(tmp_path):
     assert any("3 moves" in r["payload"]["error"] for r in error_records)
 
 
+def test_play_fight_starts_the_no_progress_count_over_when_a_next_stage_revives(tmp_path):
+    # Live (autopilot-20260929-205629.jsonl, floor 48): Test Subject's first stage died
+    # (total enemy hp 0, the lowest possible), then its next stage revived with fresh hp.
+    # Measured against that 0, no later round could ever be "a new low", so the check
+    # called a fight that was being won a wall and tried to kill it (then gave up the run).
+    corpse = combat_round(2, 0)
+    corpse["battle"]["enemies"][0]["alive"] = False
+    corpse["battle"]["enemies"][0]["revive"] = {"in_turns": 1}
+    states = [
+        combat_round(1, 50),
+        corpse,  # stage 1 dead: new low 0
+        combat_round(3, 60),  # stage 2 revived
+        combat_round(4, 55),
+        combat_round(5, 50),
+        combat_round(6, 45),  # before: stalled 4 > cap 3 -> gave up here
+        combat_round(7, 40),
+    ]
+    bridge = ScriptedBridge([*states, rewards()])
+    engine = ScriptedEngine([END_TURN])
+    runlog = RunLog(tmp_path, subdir="runs", prefix="test-")
+    player = MovePlayer(bridge, engine, runlog, game_version="v0.107.1", no_progress_rounds=3)
+
+    outcome = player.play_fight(bridge.get_state())
+
+    assert outcome.ok is True
+    assert not any(
+        "no progress" in r["payload"].get("error", "") for r in records(runlog) if r["kind"] == "error"
+    )
+
+
+def test_a_selection_left_open_after_the_last_enemy_died_is_still_answered(tmp_path):
+    # Live (autopilot-20260929-210325.jsonl, floor 6): every enemy dead, but a "Choose up
+    # to 2 cards to put into your Hand" pile screen still open. The snapshot refuses a
+    # combat with no enemy, so no move ever came back and the screen was re-read
+    # thousands of times. The screen's own selection rules answer it instead.
+    state = card_select_grid_headbutt()
+    state["battle"]["enemies"] = []
+    bridge = ScriptedBridge([state, rewards()])
+    engine = ScriptedEngine([END_TURN])
+    runlog = RunLog(tmp_path, subdir="runs", prefix="test-")
+    player = MovePlayer(bridge, engine, runlog, game_version="v0.107.1")
+
+    player.play_fight(bridge.get_state())
+
+    assert bridge.posted, "the open selection must be acted on"
+    assert engine.analyze_calls == []
+
+
 # --- a move the game keeps ignoring (Test Subject between stages, live 2026-09-29) -----
 
 

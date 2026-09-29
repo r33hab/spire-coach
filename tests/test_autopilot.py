@@ -537,3 +537,60 @@ def test_fresh_run_leaves_a_saved_run_before_starting(tmp_path, monkeypatch):
     runlog = RunLog(tmp_path, subdir="runs", prefix="test-")
     autopilot.run(Client(), object(), runlog, runs=1, move_player=object(), fresh_run=True)
     assert left and played == [None]  # left the saved run, then embarked fresh
+
+
+# --- an event page that keeps coming back (Abyssal Baths, live 2026-09-29) --------------
+
+
+def _baths_page(description: str) -> dict:
+    return {
+        "state_type": "event",
+        "event": {
+            "event_id": "ABYSSAL_BATHS",
+            "description": description,
+            "options": [
+                {"index": 0, "title": "Linger", "is_locked": False,
+                 "text_key": "ABYSSAL_BATHS.pages.ALL.options.LINGER"},
+                {"index": 1, "title": "Exit Baths", "is_locked": False,
+                 "text_key": "ABYSSAL_BATHS.pages.ALL.options.EXIT_BATHS"},
+            ],
+        },
+    }
+
+
+def test_event_loop_guard_takes_the_way_out_of_a_page_that_keeps_coming_back():
+    # Live: Linger / Exit Baths came back after every Linger, damage rising by one, and
+    # Linger kept being picked (an 8,000 hp buffer makes it look like free max hp) until
+    # it killed the run. The third identical page in a row is a loop: take the way out.
+    from coach.autopilot import EventLoopGuard
+
+    guard = EventLoopGuard(limit=3)
+    assert guard.way_out(_baths_page("LINGER1")) is None
+    assert guard.way_out(_baths_page("LINGER2")) is None
+    assert guard.way_out(_baths_page("DEATH_WARNING"))["title"] == "Exit Baths"
+    assert guard.way_out({"state_type": "map"}) is None  # any other screen starts over
+    assert guard.way_out(_baths_page("LINGER1")) is None
+
+
+def test_play_screen_leaves_a_looping_event_without_asking_the_strategy(tmp_path):
+    from coach.autopilot import EventLoopGuard, _play_screen
+    from coach.runlog import RunLog
+
+    class Poster:
+        def __init__(self) -> None:
+            self.posted: list[dict] = []
+
+        def post_action(self, action, **kwargs):
+            self.posted.append(action)
+            return {"status": "ok"}
+
+    guard = EventLoopGuard(limit=3)
+    guard.way_out(_baths_page("LINGER1"))
+    guard.way_out(_baths_page("LINGER2"))
+    client, engine = Poster(), StubEngine()
+    runlog = RunLog(tmp_path, subdir="runs", prefix="test-")
+
+    _play_screen(client, engine, None, _baths_page("LINGER3"), runlog, guard)
+
+    assert client.posted == [{"action": "choose_event_option", "index": 1}]
+    assert engine.calls == []
