@@ -96,6 +96,28 @@ def test_autopilot_dispatches_with_restart_on_jam(monkeypatch, tmp_path):
     assert calls[0]["restart_on_jam"] is True
 
 
+def test_autopilot_dispatches_with_auto_kill_defaults(monkeypatch, tmp_path):
+    config = make_config(tmp_path)
+    calls = []
+    monkeypatch.setattr(cli, "load_config", lambda: config)
+    monkeypatch.setattr(cli, "cmd_autopilot", lambda cfg, **kwargs: calls.append(kwargs) or 0)
+
+    assert cli.main(["autopilot"]) == 0
+    assert calls[0]["auto_kill"] is True
+    assert calls[0]["auto_kill_rounds"] == cli.autoplay.DEFAULT_AUTO_KILL_NO_PROGRESS_ROUNDS
+
+
+def test_autopilot_dispatches_with_auto_kill_overridden(monkeypatch, tmp_path):
+    config = make_config(tmp_path)
+    calls = []
+    monkeypatch.setattr(cli, "load_config", lambda: config)
+    monkeypatch.setattr(cli, "cmd_autopilot", lambda cfg, **kwargs: calls.append(kwargs) or 0)
+
+    assert cli.main(["autopilot", "--no-auto-kill", "--auto-kill-rounds", "3"]) == 0
+    assert calls[0]["auto_kill"] is False
+    assert calls[0]["auto_kill_rounds"] == 3
+
+
 def test_saves_backup_dispatches_with_the_default_backup_root(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "load_config", lambda: make_config(tmp_path))
     calls = []

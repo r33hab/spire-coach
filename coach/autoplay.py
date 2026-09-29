@@ -50,6 +50,19 @@ DEFAULT_MAX_MOVES = 300  # a stuck-safety cap, not a real turn limit ("a timeout
 # specific cards are played; Aeonglass/Entomancer flood the hand instead of dealing
 # damage) rather than burning the full 300-move cap every single attempt.
 DEFAULT_NO_PROGRESS_ROUNDS = 15
+# The autopilot's own no-progress threshold (`no_progress_rounds`, when
+# `auto_kill_no_progress` is on -- coach.autopilot.run's default): tighter than
+# fight-lab's 15, because reaching it no longer means giving up on the fight -- it means
+# calling debug_kill_enemy and moving on (a real wall like The Insatiable, Aeonglass,
+# Entomancer, Lagavulin Matriarch's Strength drain to 0 damage, or the Queen's Bound;
+# spec 2026-09-29). A whole unattended run should not spend 15 rounds confirming a wall
+# it is about to clear itself anyway; 8 is still generous next to the Decimillipede's
+# worst observed plateau (4 rounds, see above).
+DEFAULT_AUTO_KILL_NO_PROGRESS_ROUNDS = 8
+# How many consecutive end_turn sends with no round/turn change count as "ignored"
+# (spec: a multi-stage boss's first stage dying left end_turn ignored 10 times in a row
+# live, 2026-09-29, while a manual click worked) before autoplay tries to recover it.
+END_TURN_STALL_THRESHOLD = 2
 # Bug 3/7: confirmed live twice tonight (Ovicopter and, in this same session, a second
 # fight) -- is_resolving stuck true, the play phase reported true, cards marked
 # can_play, yet the game refused all input, even a manual click; only a full game
@@ -280,6 +293,12 @@ class FightOutcome:
     state: dict  # the first settled non-combat state once the fight ended
     ok: bool  # False: play_fight gave up (a refused move, a snapshot it can't read, stuck)
     last_hp: int | None = None  # the player's hp at the last combat state seen
+    # True only for the no-progress give-up (auto-kill off, unavailable, or itself
+    # failed): this fight cannot be finished, so the caller (coach.autopilot._play_run)
+    # should abandon the run instead of retrying the same stuck position forever. False
+    # (default) for every other ok=False case, e.g. a transient settle-timeout blip,
+    # which the existing retry-by-calling-play_fight-again behavior still covers.
+    gave_up: bool = False
 
 
 class MovePlayer:
@@ -300,6 +319,7 @@ class MovePlayer:
         source: str = "fightlab",
         no_progress_rounds: int = DEFAULT_NO_PROGRESS_ROUNDS,
         jam_timeout_s: float = DEFAULT_JAM_TIMEOUT_S,
+        auto_kill_no_progress: bool = False,
     ) -> None:
         self._client = client
         self._engine = engine
@@ -311,6 +331,10 @@ class MovePlayer:
         self._source = source
         self._no_progress_rounds = no_progress_rounds
         self._jam_timeout_s = jam_timeout_s
+        # Off by default: fight-lab (which never passes this) keeps its exact existing
+        # give-up behavior. coach.autopilot.run turns it on for its own MovePlayer, so a
+        # wall like The Insatiable is cleared instead of ending the whole run (spec).
+        self._auto_kill_no_progress = auto_kill_no_progress
         self._jam_fingerprint: str | None = None
         self._jam_stuck_since: float = 0.0
         self._last_room_type: str | None = None
@@ -322,12 +346,24 @@ class MovePlayer:
         first (`_no_progress_rounds` full rounds without a new low in total alive-enemy
         hp -- a wall like The Insatiable or Aeonglass/Entomancer, not a slow win like
         the Decimillipede, whose segments can reattach for a few rounds at a time but
-        which this is calibrated to outlast; see DEFAULT_NO_PROGRESS_ROUNDS)."""
+        which this is calibrated to outlast; see DEFAULT_NO_PROGRESS_ROUNDS).
+
+        With `auto_kill_no_progress` on (the autopilot's own MovePlayer), reaching that
+        cap calls `debug_kill_enemy` instead of giving up, and keeps fighting whatever
+        follows (a next boss stage); only a failed/refused kill (`allow_debug_actions`
+        off) gives up, with `FightOutcome.gave_up` set so the caller abandons the run
+        instead of retrying the same stuck fight forever.
+
+        Separately, `end_turn` sent twice in a row with no round/turn change (a
+        multi-stage boss's first stage dying left it ignored live, 2026-09-29) triggers
+        its own recovery: `debug_force_play_phase` then `end_turn` again, and
+        `debug_kill_enemy` as a last resort if that still does not move it."""
         pending: tuple[dict, Move, str] | None = None
         last_hp = _hp_of(state)
         best_enemy_hp: int | None = None
         stalled_rounds = 0
         last_round_checked: int | None = None
+        end_turn_stalls = 0  # consecutive end_turn sends with no round/turn change
         for _ in range(max_moves):
             if (hp := _hp_of(state)) is not None:
                 last_hp = hp
@@ -370,6 +406,20 @@ class MovePlayer:
                     else:
                         stalled_rounds += 1
                     if stalled_rounds > self._no_progress_rounds:
+                        if pending is not None:
+                            self._resolve_check(pending, None, None, comparable=False)
+                            pending = None
+                        if self._auto_kill_no_progress and self._post_debug_kill_enemy(
+                            reason="no_progress"
+                        ):
+                            # A fresh baseline for whatever follows (a next boss stage,
+                            # or the fight just ending) -- not a comparison against the
+                            # wall that was just cleared.
+                            best_enemy_hp, stalled_rounds, last_round_checked = None, 0, None
+                            state = wait_settled(
+                                self._client, timeout_s=self._settle_timeout_s, poll_s=self._poll_s
+                            )
+                            continue
                         self._runlog.append(
                             "error",
                             {
@@ -380,9 +430,11 @@ class MovePlayer:
                                 )
                             },
                         )
-                        if pending is not None:
-                            self._resolve_check(pending, None, None, comparable=False)
-                        return FightOutcome(state=state, ok=False, last_hp=last_hp)
+                        return FightOutcome(
+                            state=state, ok=False, last_hp=last_hp, gave_up=True
+                        )
+            battle = state.get("battle") or {}
+            pre_end_turn_signature = (battle.get("round"), battle.get("turn"))
             if pending is not None:
                 self._resolve_check(pending, state, key, comparable=True)
                 pending = None
@@ -394,6 +446,18 @@ class MovePlayer:
             state = wait_settled(
                 self._client, timeout_s=self._settle_timeout_s, poll_s=self._poll_s
             )
+            if move.kind == "end_turn" and in_combat(state):
+                post_battle = state.get("battle") or {}
+                post_signature = (post_battle.get("round"), post_battle.get("turn"))
+                if post_signature == pre_end_turn_signature:
+                    end_turn_stalls += 1
+                else:
+                    end_turn_stalls = 0
+                if end_turn_stalls >= END_TURN_STALL_THRESHOLD:
+                    state = self._recover_stalled_end_turn(state, post_signature)
+                    end_turn_stalls = 0
+            else:
+                end_turn_stalls = 0
         self._runlog.append(
             "error", {"error": f"fightlab: {max_moves} moves without the fight ending"}
         )
@@ -468,6 +532,68 @@ class MovePlayer:
         )
         self.stats.moves += 1
         return live, move
+
+    def _post_debug_kill_enemy(self, *, reason: str) -> bool:
+        """Kill every living enemy through the mod's own command path (STS2MCP
+        McpMod.Debug.cs `ExecuteDebugKillEnemy` -> `CreatureCmd.Kill`), so a fight this
+        player cannot win still finishes: death, any multi-stage boss's next-stage
+        transition, and reward logic all run exactly as a real kill would. Gated by
+        `allow_debug_actions` on the mod side; a `BridgeError` there (debug actions off,
+        or nothing left alive to kill) is logged and reported as failure, not raised --
+        the caller falls back to letting the fight/run end. Logged as its own kind
+        "debug" session record (with the action), so the fidelity tools can see a
+        debug-assisted fight."""
+        try:
+            self._client.post_action({"action": "debug_kill_enemy"})
+        except BridgeError as exc:
+            self._runlog.append(
+                "error", {"error": f"autoplay: debug_kill_enemy failed ({reason}): {exc}"}
+            )
+            return False
+        self._runlog.append("debug", {"action": "debug_kill_enemy", "reason": reason})
+        return True
+
+    def _recover_stalled_end_turn(self, state: dict, stalled_signature: tuple) -> dict:
+        """`end_turn` was ignored `END_TURN_STALL_THRESHOLD` times in a row (no
+        round/turn change -- confirmed live after a multi-stage boss's first stage
+        died, 2026-09-29, while a manual click worked). Try the mod's own
+        `debug_force_play_phase` (best-effort: it only reports readiness, and does
+        nothing if debug actions are off) and send `end_turn` again; `debug_kill_enemy`
+        is the last resort, only if the position is still exactly where it was stuck."""
+        self._runlog.append(
+            "error",
+            {"error": "autoplay: end_turn ignored twice in a row; attempting recovery"},
+        )
+        try:
+            self._client.post_action({"action": "debug_force_play_phase"})
+        except BridgeError as exc:
+            self._runlog.append(
+                "error", {"error": f"autoplay: debug_force_play_phase failed: {exc}"}
+            )
+        else:
+            self._runlog.append(
+                "debug", {"action": "debug_force_play_phase", "reason": "end_turn_stall"}
+            )
+        try:
+            self._client.post_action({"action": "end_turn"})
+        except BridgeError as exc:
+            self._runlog.append(
+                "error", {"error": f"autoplay: recovery end_turn failed: {exc}"}
+            )
+        else:
+            self._runlog.append(
+                "action", {"move": {"kind": "end_turn"}, "source": "recovery"}
+            )
+            self.stats.moves += 1
+        state = wait_settled(self._client, timeout_s=self._settle_timeout_s, poll_s=self._poll_s)
+        if in_combat(state):
+            battle = state.get("battle") or {}
+            if (battle.get("round"), battle.get("turn")) == stalled_signature:
+                self._post_debug_kill_enemy(reason="end_turn_stall")
+                state = wait_settled(
+                    self._client, timeout_s=self._settle_timeout_s, poll_s=self._poll_s
+                )
+        return state
 
     def _fallback_selection(self, live: dict) -> None:
         """Act on a selection the engine could not read, by the screen's own rules.

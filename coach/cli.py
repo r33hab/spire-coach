@@ -25,7 +25,7 @@ from pathlib import Path
 
 import uvicorn
 
-from coach import autopilot, dashboard, deckseed, fidelity_scoreboard, fightlab, navigator
+from coach import autopilot, autoplay, dashboard, deckseed, fidelity_scoreboard, fightlab, navigator
 from coach.bridge.client import BridgeAuthError, BridgeError, ModClient
 from coach.bridge.versions import VersionStatus, check_versions, read_game_version
 from coach.capture import capture_loop
@@ -37,6 +37,7 @@ from coach.config import (
     SAVE_ROOT,
     Config,
     load_config,
+    read_allow_debug_actions,
     read_token,
 )
 from coach.engine import EngineClient
@@ -471,6 +472,8 @@ def cmd_autopilot(
     workers: int = DEFAULT_WORKERS,
     budget_s: float = DEFAULT_BUDGET_S,
     restart_on_jam: bool = False,
+    auto_kill: bool = True,
+    auto_kill_rounds: int = autoplay.DEFAULT_AUTO_KILL_NO_PROGRESS_ROUNDS,
     client_factory: Callable[[str, str | None], ModClient] | None = None,
     engine_factory: Callable[[], EngineClient] | None = None,
 ) -> int:
@@ -515,6 +518,9 @@ def cmd_autopilot(
                 game_version=read_game_version() or "unknown",
                 say=_say,
                 restart_on_jam=restart_on_jam,
+                auto_kill=auto_kill,
+                auto_kill_no_progress_rounds=auto_kill_rounds,
+                allow_debug_actions=read_allow_debug_actions(config.mods_dir),
             )
             _say(summary.format())
         finally:
@@ -1062,6 +1068,26 @@ def _build_parser() -> argparse.ArgumentParser:
             "stopping (default: off -- stop with a clear message)"
         ),
     )
+    autopilot_parser.add_argument(
+        "--auto-kill",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "on no progress (a wall like The Insatiable, Aeonglass, Entomancer, "
+            "Lagavulin Matriarch or the Queen), call the mod's debug_kill_enemy and "
+            "keep playing instead of ending the run (needs allow_debug_actions; "
+            "default: on)"
+        ),
+    )
+    autopilot_parser.add_argument(
+        "--auto-kill-rounds",
+        type=int,
+        default=autoplay.DEFAULT_AUTO_KILL_NO_PROGRESS_ROUNDS,
+        help=(
+            "rounds without a new low in total enemy hp before --auto-kill acts "
+            "(default: %(default)s)"
+        ),
+    )
 
     return parser
 
@@ -1142,6 +1168,8 @@ def main(argv: list[str] | None = None) -> int:
                 workers=args.workers,
                 budget_s=args.budget,
                 restart_on_jam=args.restart_on_jam,
+                auto_kill=args.auto_kill,
+                auto_kill_rounds=args.auto_kill_rounds,
             )
     except navigator.NavigatorError as exc:
         print(str(exc), file=sys.stderr)
