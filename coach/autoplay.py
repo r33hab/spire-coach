@@ -33,7 +33,7 @@ from coach.bridge.decisions import (
     fingerprint,
     is_settled,
 )
-from coach.engine import EngineClient, EngineError, Move
+from coach.engine import EngineClient, EngineError, Move, MoveStat
 from coach.runlog import RunLog
 from coach.snapshot import SnapshotError, build_live_snapshot
 
@@ -94,8 +94,17 @@ def playable_choice(state: dict, analysis) -> Move:
         return analysis.best
     for move in sorted(analysis.moves, key=lambda m: m.visits, reverse=True):
         if allowed(move):
-            return move
-    return next((m for m in analysis.moves if m.kind == "end_turn"), analysis.best)
+            return _plain_move(move)
+    fallback = next((m for m in analysis.moves if m.kind == "end_turn"), analysis.best)
+    return _plain_move(fallback)
+
+
+def _plain_move(move):
+    """A `MoveStat` as the plain `Move` it names: the logs and the fidelity replay
+    expect only a move's identity fields, not its search statistics."""
+    if isinstance(move, MoveStat):
+        return Move(**{f.name: getattr(move, f.name) for f in dataclasses.fields(Move)})
+    return move
 
 
 def move_to_action(move: Move) -> dict | None:
