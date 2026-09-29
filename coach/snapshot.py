@@ -289,7 +289,7 @@ def _build_card(card: dict, *, path: str, warnings: list[str]) -> dict:
     fields = _require_readable_dict(
         card, "fields", f"{path}.fields", warnings=warnings, context="card.fields"
     )
-    return {
+    built = {
         "id": _require_str(card, "id", f"{path}.id"),
         "upgraded": _require_bool(card, "is_upgraded", f"{path}.is_upgraded"),
         "uid": card.get("uid"),
@@ -298,6 +298,10 @@ def _build_card(card: dict, *, path: str, warnings: list[str]) -> dict:
         "enchant_amount": enchantment.get("amount") if enchantment else None,
         "fields": _build_card_fields(fields),
     }
+    # Optional, only when set (e.g. the Queen's "BOUND"): sts2_gym.live.convert.AFFLICTIONS.
+    if isinstance(card.get("affliction"), str):
+        built["affliction"] = card["affliction"]
+    return built
 
 
 def _draw_pile_sort_key(card: dict):

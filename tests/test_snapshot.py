@@ -134,6 +134,7 @@ def test_full_combat_fixture_produces_exact_expected_snapshot(combat_state):
                 "enchantment": None,
                 "enchant_amount": None,
                 "fields": {},
+                "affliction": "BOUND",
             },
             {
                 "id": "TRUE_GRIT",
@@ -163,6 +164,7 @@ def test_full_combat_fixture_produces_exact_expected_snapshot(combat_state):
                 "enchantment": None,
                 "enchant_amount": None,
                 "fields": {},
+                "affliction": "BOUND",
             },
             {
                 "id": "BASH",
@@ -645,6 +647,16 @@ def test_x_cost_card_has_null_cost(combat_state):
     snapshot = build_live_snapshot(combat_state, game_version=GAME_VERSION)
     whirlwind = next(c for c in snapshot["hand"] if c["id"] == "WHIRLWIND")
     assert whirlwind["cost"] is None
+
+
+def test_card_affliction_is_carried_only_when_the_mod_reports_one(combat_state):
+    # The Queen's Bound (autopilot stuck on it): the mod reports `affliction` per card,
+    # and sts2_gym's converter reads it off the snapshot card (live/cards.py: a BOUND
+    # copy is `bound` in the emulator), so the search can see a Bound card.
+    combat_state["player"]["hand"][0]["affliction"] = "BOUND"
+    snapshot = build_live_snapshot(combat_state, game_version=GAME_VERSION)
+    assert snapshot["hand"][0]["affliction"] == "BOUND"
+    assert "affliction" not in snapshot["hand"][1]
 
 
 def test_negative_cost_without_unplayable_flag_has_null_cost_in_hand(combat_state):
@@ -1417,6 +1429,7 @@ def test_a_hover_tip_that_is_not_a_card_gives_swipe_no_card(combat_state):
 # ---------------------------------------------------------------------------
 
 _CARD_KEYS = {"id", "upgraded", "uid", "cost", "enchantment", "enchant_amount", "fields"}
+_OPTIONAL_CARD_KEYS = {"affliction"}  # only when the mod reports one (e.g. "BOUND")
 _ENEMY_KEYS = {
     "entity_id",
     "id",
@@ -1494,7 +1507,7 @@ _PENDING_SELECTION_KEYS = {
 
 
 def _assert_card_shape(card: dict) -> None:
-    assert set(card.keys()) == _CARD_KEYS
+    assert _CARD_KEYS <= set(card.keys()) <= _CARD_KEYS | _OPTIONAL_CARD_KEYS
     assert isinstance(card["id"], str)
     assert isinstance(card["upgraded"], bool)
     assert card["uid"] is None or isinstance(card["uid"], str)
@@ -1621,6 +1634,10 @@ _KNOWN_SAMPLE_COVERAGE_GAPS = {
     "player.orbs.list.id",
     "player.orbs.list.passive",
     "player.orbs.list.evoke",
+    # The converter accepts it (sts2_gym.live.convert `_card`'s optional keys), but no
+    # converter live fixture has an afflicted card yet; combat_full.json has two BOUND.
+    "hand.affliction",
+    "draw_pile.affliction",
 }
 
 # ai_fields and relic fields are explicitly open-ended: the schema documents
@@ -1739,6 +1756,6 @@ def test_pending_selection_keys_are_subset_of_schema_section_1_1(
         assert pending is not None
         assert set(pending.keys()) <= _PENDING_SELECTION_KEYS
         for candidate in pending["candidates"]:
-            assert set(candidate.keys()) <= _CARD_KEYS
+            assert set(candidate.keys()) <= _CARD_KEYS | _OPTIONAL_CARD_KEYS
         if pending["played_card"] is not None:
-            assert set(pending["played_card"].keys()) <= _CARD_KEYS
+            assert set(pending["played_card"].keys()) <= _CARD_KEYS | _OPTIONAL_CARD_KEYS
