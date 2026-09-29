@@ -90,6 +90,13 @@ def _execute(client: ModClient, state: dict, kind: str, option: dict) -> bool:
     if kind == "neow.relic":
         return _index_action(client, option, "select_relic", "index")
     if kind == "select.offer":
+        grid = state.get("card_select") or {}
+        cards = grid.get("cards") or []
+        chosen = sum(1 for card in cards if card.get("selected"))
+        if chosen >= (grid.get("required_count") or grid.get("max_select") or 1):
+            return _post(client, {"action": "confirm_selection"})
+        if any(c.get("index") == option.get("action") and c.get("selected") for c in cards):
+            return False  # already picked (a click would unselect it): the fallback picks anew
         return _index_action(client, option, "select_card", "index")
     return False
 

@@ -524,12 +524,24 @@ def _select_first_card(client: ModClient, state: dict) -> None:
     confirmation can close the screen by itself on a single-pick grid with manual
     confirmation off, so `confirm_selection` afterward is best-effort (`_try`), same as
     every other multi-action branch here (`rest_site`, `treasure`)."""
-    cards = (state.get("card_select") or {}).get("cards") or []
+    grid = state.get("card_select") or {}
+    cards = grid.get("cards") or []
     if not cards:
         return
-    index = cards[0].get("index", 0)
-    if _try(client, {"action": "select_card", "index": index}) is not None:
+    # A grid can ask for several cards ("Choose 2 Common Cards to Add to Your Deck"):
+    # click only unselected cards -- clicking a selected one unselects it, which looped
+    # forever -- and confirm once the required count is reached.
+    required = grid.get("required_count") or grid.get("min_select") or 1
+    chosen = grid.get("selected_count")
+    if chosen is None:
+        chosen = sum(1 for card in cards if card.get("selected"))
+    pick = next((card for card in cards if not card.get("selected")), None)
+    if chosen >= required or pick is None:
         _try(client, {"action": "confirm_selection"})
+        return
+    if _try(client, {"action": "select_card", "index": pick.get("index", 0)}) is not None:
+        if chosen + 1 >= required:
+            _try(client, {"action": "confirm_selection"})
 
 
 def _try(client: ModClient, action: dict) -> dict | None:

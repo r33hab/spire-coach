@@ -9,6 +9,7 @@ import time
 import pytest
 from fakes.fake_mod import ScriptedMod
 
+from coach import navigator
 from coach.bridge.client import BridgeError
 from coach.config import CONF_FILE_NAME, Config
 from coach.navigator import (
@@ -481,6 +482,32 @@ def test_advance_one_step_card_select_picks_the_first_card_and_confirms():
     assert {"action": "select_card", "index": 0} in mod.posted
     assert {"action": "confirm_selection"} in mod.posted
     assert not any(a.get("action") == "skip_card_reward" for a in mod.posted)
+
+
+def _two_pick_grid(selected: set[int]) -> dict:
+    cards = [{"index": i, "id": f"CARD_{i}", "selected": i in selected} for i in range(4)]
+    return {"state_type": "card_select", "card_select": {"cards": cards, "min_select": 2,
+            "max_select": 2, "required_count": 2, "selected_count": len(selected)}}
+
+
+def test_a_two_pick_grid_picks_a_second_unselected_card_then_confirms():
+    # Live (the user, 2026-09-29): "Choose 2 Common Cards to Add to Your Deck" with card
+    # 0 already selected; re-clicking card 0 unselected it and looped forever.
+    client = _SequencedClient([])
+    navigator._select_first_card(client, _two_pick_grid({0}))
+    assert client.posted == [{"action": "select_card", "index": 1}, {"action": "confirm_selection"}]
+
+
+def test_a_two_pick_grid_does_not_confirm_after_the_first_pick():
+    client = _SequencedClient([])
+    navigator._select_first_card(client, _two_pick_grid(set()))
+    assert client.posted == [{"action": "select_card", "index": 0}]
+
+
+def test_a_full_two_pick_grid_only_confirms():
+    client = _SequencedClient([])
+    navigator._select_first_card(client, _two_pick_grid({0, 2}))
+    assert client.posted == [{"action": "confirm_selection"}]
 
 
 def test_advance_one_step_card_select_with_no_cards_does_not_crash():
