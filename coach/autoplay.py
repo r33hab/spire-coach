@@ -224,14 +224,19 @@ def _confirm_action(kind: str) -> dict | None:
     return {"action": "confirm_selection"}
 
 
-def _skip_action(kind: str) -> dict:
+def _skip_action(kind: str, min_: int = 0) -> dict:
     """Decline a skippable selection with nothing picked yet. HAND has no separate
     skip control -- confirming with zero selected (only ever attempted when `min` is 0)
-    is how a hand pick is declined. GRID and CHOOSE both skip through
-    `cancel_selection` (STS2MCP `ExecuteCancelSelection`: the choose screen's own Skip
-    button, or the grid's Close, whichever is open)."""
+    is how a hand pick is declined. A GRID that needs no pick (`min` 0) closes the same
+    way, through its own confirm: live 2026-09-29, Neow's Fury's discard-pile grid
+    ignored `cancel_selection` hundreds of times, and `confirm_selection` with nothing
+    picked closed it at once. CHOOSE, and a GRID that needs picks but can be cancelled
+    (the deck screens), skip through `cancel_selection` (STS2MCP
+    `ExecuteCancelSelection`: the choose screen's own Skip button, or the grid's Close)."""
     if kind == "HAND":
         return {"action": "combat_confirm_selection"}
+    if kind == "GRID" and min_ == 0:
+        return {"action": "confirm_selection"}
     return {"action": "cancel_selection"}
 
 
@@ -275,7 +280,7 @@ def _selection_step(selection: dict, move: Move) -> tuple[Move, dict | None]:
     if move.kind == "select":
         return move, _select_action(kind, move.select_index)
     if can_skip and selected_count == 0:
-        return move, _skip_action(kind)
+        return move, _skip_action(kind, min_)
     if met_min:
         return move, _confirm_action(kind)
     forced = _forced_selection_move(selection)

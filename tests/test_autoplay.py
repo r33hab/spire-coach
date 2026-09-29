@@ -740,6 +740,19 @@ def test_a_selection_left_open_after_the_last_enemy_died_is_still_answered(tmp_p
     assert engine.analyze_calls == []
 
 
+def test_an_optional_grid_pick_is_declined_by_confirming_nothing():
+    # Live (2026-09-29, Neow's Fury: "put up to 2 cards from your Discard Pile into your
+    # Hand", min 0): the combat pile grid ignored cancel_selection hundreds of times, and
+    # confirm_selection with nothing picked closed it at once (checked on the live game).
+    # cancel stays for a grid that needs picks but can be cancelled (the deck screens).
+    from coach.autoplay import _NO_ENGINE_MOVE, _selection_step
+
+    optional = {"kind": "GRID", "min": 0, "max": 2, "can_skip": True, "selected_uids": []}
+    assert _selection_step(optional, _NO_ENGINE_MOVE)[1] == {"action": "confirm_selection"}
+    cancelable = {"kind": "GRID", "min": 1, "max": 1, "can_skip": True, "selected_uids": []}
+    assert _selection_step(cancelable, _NO_ENGINE_MOVE)[1] == {"action": "cancel_selection"}
+
+
 # --- a move the game keeps ignoring (Test Subject between stages, live 2026-09-29) -----
 
 
