@@ -91,6 +91,9 @@ def _execute(client: ModClient, state: dict, kind: str, option: dict) -> bool:
         if state.get("state_type") == "event":
             # An Ancient's relic offer after Act 1 (Pael, live 2026-09-29) is an event
             # screen: select_relic does nothing there, choose_event_option takes it.
+            options = (state.get("event") or {}).get("options") or []
+            if any(o.get("index") == option.get("action") and o.get("is_locked") for o in options):
+                return False  # a locked option is refused: the fallback takes an open one
             return _index_action(client, option, "choose_event_option", "index")
         return _index_action(client, option, "select_relic", "index")
     if kind == "select.offer":

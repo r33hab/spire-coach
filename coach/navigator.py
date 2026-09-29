@@ -232,10 +232,10 @@ def _reach_the_map(client: ModClient, state: dict, *, timeout_s: float) -> dict:
     for _ in range(5):
         if state.get("state_type") != "event":
             return state
-        options = (state.get("event") or {}).get("options") or []
-        if not options:
+        pick = first_open_event_option(state)
+        if pick is None:
             return state
-        client.post_action({"action": "choose_event_option", "index": options[0].get("index", 0)})
+        client.post_action({"action": "choose_event_option", "index": pick.get("index", 0)})
         time.sleep(1.5)
         state = client.get_state()
     return state
@@ -478,9 +478,9 @@ def advance_one_step(client: ModClient, state: dict, *, runlog: RunLog | None = 
             _try(client, {"action": "choose_rest_option", "index": pick["index"]})
         _try(client, {"action": "proceed"})
     elif state_type == "event":
-        options = (state.get("event") or {}).get("options") or []
-        if options:
-            _try(client, {"action": "choose_event_option", "index": options[0].get("index", 0)})
+        pick = first_open_event_option(state)
+        if pick is not None:
+            _try(client, {"action": "choose_event_option", "index": pick.get("index", 0)})
     elif state_type == "relic_select":
         _try(client, {"action": "select_relic", "index": 0})
     elif state_type == "bundle_select":
@@ -524,9 +524,20 @@ def _advance_crystal_sphere(client: ModClient, state: dict) -> None:
     clickable = sphere.get("clickable_cells") or []
     if clickable:
         cell = clickable[0]
-        _try(client, {"action": "crystal_sphere_click_cell", "x": cell.get("x"), "y": cell.get("y")})
+        _try(
+            client,
+            {"action": "crystal_sphere_click_cell", "x": cell.get("x"), "y": cell.get("y")},
+        )
     else:
         _try(client, {"action": "crystal_sphere_proceed"})
+
+
+def first_open_event_option(state: dict) -> dict | None:
+    """The first event option the game will take. A locked one ("Broke -- you are out
+    of Gold", the Endless Conveyor, live 2026-09-29) is refused, and picking it again
+    and again stalled the autopilot."""
+    options = (state.get("event") or {}).get("options") or []
+    return next((o for o in options if not o.get("is_locked")), None)
 
 
 def potion_belt_full(state: dict) -> bool:
@@ -534,7 +545,8 @@ def potion_belt_full(state: dict) -> bool:
     again forever stalled the autopilot on a rewards screen (live, 2026-09-29)."""
     player = state.get("player") or {}
     slots = player.get("max_potion_slots") or player.get("potion_slots")
-    held = [p for p in player.get("potions") or [] if p and (not isinstance(p, dict) or p.get("id"))]
+    potions = player.get("potions") or []
+    held = [p for p in potions if p and (not isinstance(p, dict) or p.get("id"))]
     return isinstance(slots, int) and len(held) >= slots
 
 

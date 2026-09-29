@@ -678,3 +678,15 @@ def test_an_unknown_screen_is_waited_out_not_proceeded(monkeypatch):
     navigator.advance_one_step(client, state)
     assert client.posted == [{"action": "proceed"}]
     navigator._UNKNOWN_SINCE.clear()
+
+
+def test_an_event_skips_a_locked_option():
+    # Live (2026-09-29): the Endless Conveyor's "Broke" (out of Gold) is locked; picking
+    # option 0 again and again stalled the autopilot. Take the open "Leave".
+    state = {"state_type": "event", "event": {"event_id": "ENDLESS_CONVEYOR", "options": [
+        {"index": 0, "title": "Broke", "is_locked": True},
+        {"index": 1, "title": "Leave", "is_locked": False}]}}
+    client = _SequencedClient([state])
+    navigator.advance_one_step(client, state)
+    assert {"action": "choose_event_option", "index": 1} in client.posted
+    assert {"action": "choose_event_option", "index": 0} not in client.posted
