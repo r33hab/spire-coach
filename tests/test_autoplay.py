@@ -726,3 +726,26 @@ def test_a_card_the_game_marks_unplayable_is_never_sent():
     assert playable_choice(state, analysis) is defend
     state["player"]["hand"][1]["can_play"] = False
     assert playable_choice(state, analysis) is end
+
+
+def test_an_unreadable_any_number_selection_confirms_instead_of_spinning(tmp_path):
+    # Live (2026-09-29): "choose any number of cards" -- after one pick the converter
+    # refused the state ("selected_uids[0]: not the uid of a candidate"), no decision
+    # came back, and the screen spun until the autopilot's 4000-screen cap.
+    class SelectionBlindEngine(ScriptedEngine):
+        def analyze(self, live, **kwargs):
+            if live.get("pending_selection"):
+                raise EngineError("conversion: selected_uids[0]: not the uid of a candidate")
+            return super().analyze(live, **kwargs)
+
+    picked = hand_select_burning_pact()  # one card already selected
+    picked["hand_select"]["selection"]["min"] = 0
+    picked["hand_select"]["selection"]["max"] = 999999999
+    bridge = ScriptedBridge([combat(), picked, rewards()])
+    engine = SelectionBlindEngine([END_TURN])
+    runlog = RunLog(tmp_path, subdir="runs", prefix="test-")
+    player = MovePlayer(bridge, engine, runlog, game_version="v0.107.1")
+
+    player.play_fight(bridge.get_state())
+
+    assert any(a.get("action") in ("combat_confirm_selection", "confirm_selection") for a in bridge.posted)

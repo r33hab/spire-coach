@@ -191,6 +191,19 @@ def _skip_action(kind: str) -> dict:
     return {"action": "cancel_selection"}
 
 
+_NO_ENGINE_MOVE = Move(
+    kind="none",
+    card_index=None,
+    card_uid=None,
+    card_id=None,
+    potion_slot=None,
+    potion_id=None,
+    target=None,
+    select_index=None,
+    label="(no engine decision)",
+)
+
+
 def _selection_step(selection: dict, move: Move) -> tuple[Move, dict | None]:
     """What to do about one pending in-combat selection (schema section 1.1), given
     the engine's proposed `move` for this decision. Never sends more than one action:
@@ -411,6 +424,8 @@ class MovePlayer:
             analysis = self._engine.analyze(live, time_budget_s=self._time_budget_s)
         except EngineError as exc:
             self._runlog.append("analysis", {"fingerprint": key, "error": str(exc)})
+            if decision.kind is DecisionKind.COMBAT_SELECT:
+                self._fallback_selection(live)
             return None
         self._runlog.append(
             "analysis",
@@ -444,6 +459,26 @@ class MovePlayer:
         )
         self.stats.moves += 1
         return live, move
+
+    def _fallback_selection(self, live: dict) -> None:
+        """Act on a selection the engine could not read, by the screen's own rules.
+
+        Live (2026-09-29): on an "any number" screen a picked card leaves the candidate
+        list and the converter refused the state, so no decision came back and the
+        screen spun until the 4000-screen cap. `_selection_step` with no engine pick
+        confirms once the minimum is met (nothing, on an any-number screen), skips when
+        allowed, and otherwise forces the first candidate. No check is recorded: the
+        action is not the engine's."""
+        selection = live.get("pending_selection") or {}
+        move, action = _selection_step(selection, _NO_ENGINE_MOVE)
+        if action is None:
+            return
+        try:
+            self._client.post_action(action)
+        except BridgeError as exc:
+            self._runlog.append("action", {"move": dataclasses.asdict(move), "error": str(exc)})
+            return
+        self._runlog.append("action", {"move": dataclasses.asdict(move), "source": "fallback"})
 
     def _resolve_check(
         self,
