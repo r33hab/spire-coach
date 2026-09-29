@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from coach.autoplay import GameJamError, MovePlayer, in_combat, move_to_action, wait_settled
+from coach.bridge.client import BridgeError
 from coach.engine import Analysis, CheckResult, EngineError, Move
 from coach.runlog import RunLog
 
@@ -172,6 +173,7 @@ class ScriptedBridge:
             "select_card",
             "confirm_selection",
             "cancel_selection",
+            "debug_kill_enemy",
         }
     )
 
@@ -560,11 +562,77 @@ def test_play_fight_gives_up_on_no_progress_past_the_round_cap(tmp_path):
     outcome = player.play_fight(bridge.get_state())
 
     assert outcome.ok is False
+    assert outcome.gave_up is True  # auto_kill_no_progress is off by default: a real give-up
     error_records = [r for r in records(runlog) if r["kind"] == "error"]
     assert any("no progress" in r["payload"]["error"] for r in error_records)
     # gave up mid-round 5, well short of exhausting engine.analyze_calls on every move
     assert engine.analyze_calls  # some analysis happened before giving up
     assert bridge.posted == [{"action": "end_turn"}] * 4  # 4 turns played, 5th aborted
+    assert not any(r["kind"] == "debug" for r in records(runlog))  # never attempted
+
+
+def test_play_fight_auto_kills_on_no_progress_and_keeps_fighting_the_next_stage(tmp_path):
+    # Spec 2026-09-29 ("kill the enemy it can't beat so it always progresses"): the same
+    # wall as the test above, but with auto_kill_no_progress on. Round 5 still trips the
+    # cap, but instead of giving up, debug_kill_enemy is sent and the fight keeps going
+    # against whatever follows -- here a fresh-hp "next stage" that then wins normally,
+    # exactly like a multi-stage boss.
+    states = [
+        *[combat_round(r, 50, seq=r) for r in range(1, 6)],  # rounds 1-5, stalled at 50
+        combat_round(1, 80, seq=100),  # the next stage: fresh hp, round resets to 1
+        rewards(),
+    ]
+    bridge = ScriptedBridge(states)
+    engine = ScriptedEngine([END_TURN])
+    runlog = RunLog(tmp_path, subdir="runs", prefix="test-")
+    player = MovePlayer(
+        bridge,
+        engine,
+        runlog,
+        game_version="v0.107.1",
+        no_progress_rounds=3,
+        auto_kill_no_progress=True,
+    )
+
+    outcome = player.play_fight(bridge.get_state())
+
+    assert outcome.ok is True
+    assert outcome.gave_up is False
+    assert outcome.state["state_type"] == "rewards"
+    assert bridge.posted == (
+        [{"action": "end_turn"}] * 4
+        + [{"action": "debug_kill_enemy"}]
+        + [{"action": "end_turn"}]
+    )
+    debug_records = [r["payload"] for r in records(runlog) if r["kind"] == "debug"]
+    assert debug_records == [{"action": "debug_kill_enemy", "reason": "no_progress"}]
+
+
+def test_play_fight_falls_back_to_giving_up_when_auto_kill_is_refused(tmp_path):
+    # allow_debug_actions off (or any other reason the mod refuses it): the fight still
+    # cannot be won, so this must fall back to the plain give-up, not crash or spin.
+    states = [combat_round(r, 50, seq=r) for r in range(1, 6)]
+    bridge = ScriptedBridge(states)
+    bridge.raise_on["debug_kill_enemy"] = BridgeError("debug actions disabled")
+    engine = ScriptedEngine([END_TURN])
+    runlog = RunLog(tmp_path, subdir="runs", prefix="test-")
+    player = MovePlayer(
+        bridge,
+        engine,
+        runlog,
+        game_version="v0.107.1",
+        no_progress_rounds=3,
+        auto_kill_no_progress=True,
+    )
+
+    outcome = player.play_fight(bridge.get_state())
+
+    assert outcome.ok is False
+    assert outcome.gave_up is True
+    assert {"action": "debug_kill_enemy"} in bridge.posted
+    error_records = [r for r in records(runlog) if r["kind"] == "error"]
+    assert any("debug_kill_enemy failed" in r["payload"]["error"] for r in error_records)
+    assert any("no progress" in r["payload"]["error"] for r in error_records)
 
 
 def test_play_fight_does_not_give_up_while_enemy_hp_keeps_dropping(tmp_path):
@@ -608,9 +676,11 @@ def test_play_fight_tolerates_a_plateau_shorter_than_the_cap_like_the_decimillip
 
 def test_play_fight_gives_up_after_max_moves(tmp_path):
     # Every posted action leaves the fixture's own fingerprint unchanged (the fake
-    # bridge only advances on request), so the fight never settles anywhere new.
+    # bridge only advances on request), so the fight never settles anywhere new. A card
+    # move, not end_turn: a frozen fixture is indistinguishable from an end_turn stall
+    # (same round/turn every read), and this test's own cap is what's under test here.
     bridge = ScriptedBridge([combat()])
-    engine = ScriptedEngine([END_TURN])
+    engine = ScriptedEngine([card_move()])
     runlog = RunLog(tmp_path, subdir="runs", prefix="test-")
     player = MovePlayer(bridge, engine, runlog, game_version="v0.107.1")
 
@@ -620,6 +690,77 @@ def test_play_fight_gives_up_after_max_moves(tmp_path):
     assert player.stats.moves == 3
     error_records = [r for r in records(runlog) if r["kind"] == "error"]
     assert any("3 moves" in r["payload"]["error"] for r in error_records)
+
+
+# --- end-turn stall recovery (a multi-stage boss's first stage dying, live 2026-09-29) --
+
+
+def test_play_fight_recovers_a_stalled_end_turn_via_force_play_phase(tmp_path):
+    # Live: after a multi-stage boss's first stage died, end_turn was ignored (no
+    # round/turn change) 10 times in a row while a manual click worked. Two ignored
+    # end_turns must trigger debug_force_play_phase, then end_turn again; here that
+    # unsticks it (round 2 -> 3) and the fight then wins normally.
+    states = [
+        combat_round(2, 50, seq=1),
+        combat_round(2, 50, seq=2),  # 1st end_turn ignored: still round 2
+        combat_round(2, 50, seq=3),  # 2nd ignored -> triggers recovery
+        combat_round(3, 50, seq=4),  # the recovery's own end_turn: round 3, unstuck
+        rewards(),
+    ]
+    bridge = ScriptedBridge(states)
+    engine = ScriptedEngine([END_TURN])
+    runlog = RunLog(tmp_path, subdir="runs", prefix="test-")
+    player = MovePlayer(bridge, engine, runlog, game_version="v0.107.1")
+
+    outcome = player.play_fight(bridge.get_state())
+
+    assert outcome.ok is True
+    assert outcome.state["state_type"] == "rewards"
+    assert bridge.posted == [
+        {"action": "end_turn"},
+        {"action": "end_turn"},
+        {"action": "debug_force_play_phase"},
+        {"action": "end_turn"},
+        {"action": "end_turn"},
+    ]
+    debug_records = [r["payload"] for r in records(runlog) if r["kind"] == "debug"]
+    assert debug_records == [{"action": "debug_force_play_phase", "reason": "end_turn_stall"}]
+    error_records = [r for r in records(runlog) if r["kind"] == "error"]
+    assert any("ignored twice" in r["payload"]["error"] for r in error_records)
+
+
+def test_play_fight_kills_the_enemy_as_a_last_resort_when_the_stall_persists(tmp_path):
+    # The recovery sequence itself does not unstick it this time (still round 2
+    # afterward): debug_kill_enemy is the last resort, and it is what actually ends the
+    # fight here.
+    states = [
+        combat_round(2, 50, seq=1),
+        combat_round(2, 50, seq=2),
+        combat_round(2, 50, seq=3),  # 2nd ignore -> triggers recovery
+        combat_round(2, 50, seq=4),  # recovery's own end_turn: still round 2, still stuck
+        rewards(),  # after debug_kill_enemy
+    ]
+    bridge = ScriptedBridge(states)
+    engine = ScriptedEngine([END_TURN])
+    runlog = RunLog(tmp_path, subdir="runs", prefix="test-")
+    player = MovePlayer(bridge, engine, runlog, game_version="v0.107.1")
+
+    outcome = player.play_fight(bridge.get_state())
+
+    assert outcome.ok is True
+    assert outcome.state["state_type"] == "rewards"
+    assert bridge.posted == [
+        {"action": "end_turn"},
+        {"action": "end_turn"},
+        {"action": "debug_force_play_phase"},
+        {"action": "end_turn"},
+        {"action": "debug_kill_enemy"},
+    ]
+    debug_records = [r["payload"] for r in records(runlog) if r["kind"] == "debug"]
+    assert debug_records == [
+        {"action": "debug_force_play_phase", "reason": "end_turn_stall"},
+        {"action": "debug_kill_enemy", "reason": "end_turn_stall"},
+    ]
 
 
 def test_wait_settled_returns_last_state_on_timeout():
