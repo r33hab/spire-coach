@@ -50,6 +50,14 @@ SYNCED_ROOTS = (
     Path.home() / "Documents/git/sts2-wt/desktop",
 )
 REMOTE_FRESH_S = 40 * 60
+# Fight-learning loops (sts2 rl.prior_loop): the desktop's, synced here by
+# desktop_fight_job.sh, and a run on this Mac. Each round's eval.json is its gate result
+# on the same 2,000 real fights; round 0's champion is plain search.
+FIGHT_ROOTS = (
+    ("Desktop · teacher 300 sims", Path.home() / "Documents/git/sts2-wt/desktop/prior_loop"),
+    ("This Mac · teacher 600 sims", Path.home() / "Documents/git/sts2/runs/prior_loop_600"),
+)
+FIGHTS_PER_PART = 40  # rl.prior_loop writes generated fights in parts of 40
 PROBE_TIMEOUT_S = 0.8  # the game and the coach answer locally, well within this
 _LOG_LINES = 40
 _LOG_TAIL_BYTES = 64 * 1024
@@ -202,6 +210,56 @@ def _trend_point(path: Path) -> dict[str, Any] | None:
     }
 
 
+def collect_fight_learning(
+    roots: tuple[tuple[str, Path], ...] = FIGHT_ROOTS,
+) -> list[dict[str, Any]]:
+    """Every fight-learning loop found: per round, its gate result (deaths of the best
+    network so far against the new one, the end-HP gain and its CI's lower bound, whether
+    it was promoted) or, for the round in progress, how far it has got."""
+    loops = []
+    for label, root in roots:
+        config = _read_json(root / "config.json")
+        if not isinstance(config, dict):
+            continue
+        rounds = []
+        for it in sorted(root.glob("iter_[0-9][0-9][0-9][0-9]")):
+            evaluation = _read_json(it / "eval.json")
+            decision = evaluation.get("decision") if isinstance(evaluation, dict) else None
+            decision = decision if isinstance(decision, dict) else {}
+            parts = it / "generated_parts"
+            rounds.append(
+                {
+                    "round": int(it.name[5:]),
+                    "deaths_champion": decision.get("deaths_champion"),
+                    "deaths_challenger": decision.get("deaths_challenger"),
+                    "end_hp": decision.get("mean_diff_end_hp"),
+                    "ci_low": decision.get("ci_low"),
+                    "promoted": decision.get("promote"),
+                    "trained": (it / "trained.json").exists(),
+                    "parts": len(list(parts.glob("*.npz"))) if parts.is_dir() else None,
+                }
+            )
+        champion = _read_json(root / "champion.json")
+        champion = champion if isinstance(champion, dict) else {}
+        metrics = champion.get("metrics") if isinstance(champion.get("metrics"), dict) else {}
+        first = next((r for r in rounds if r["round"] == 0), None)
+        updated = [path.stat().st_mtime for path in root.rglob("*.json")]
+        loops.append(
+            {
+                "label": label,
+                "root": str(root),
+                "sims": config.get("sims"),
+                "parts_per_round": (config.get("train_fights") or 0) // FIGHTS_PER_PART or None,
+                "champion_round": champion.get("iteration"),
+                "plain_deaths": first["deaths_champion"] if first else None,
+                "best_deaths": (metrics.get("challenger") or {}).get("deaths"),
+                "rounds": rounds,
+                "updated_at": max(updated) if updated else None,
+            }
+        )
+    return loops
+
+
 def snapshot_source(
     root: Path,
     client: ModClient,
@@ -224,6 +282,7 @@ def snapshot_source(
                 if fidelity_dir is not None
                 else {"found": False, "root": None}
             ),
+            "fight": collect_fight_learning(),
         }
 
     return snapshot

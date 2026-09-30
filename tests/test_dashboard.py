@@ -332,3 +332,23 @@ def test_the_app_serves_the_page_and_the_snapshot_only_to_itself(tmp_path: Path)
     assert api.status_code == 200 and api.json() == {"training": {"found": False}, "value": None}
     assert api.headers["cache-control"] == "no-store"
     assert foreign.status_code == 400
+
+
+def test_fight_learning_reads_each_rounds_gate_result_and_the_round_in_progress(tmp_path: Path) -> None:
+    root = tmp_path / "prior_loop"
+    _write(root / "config.json", {"sims": 600, "train_fights": 10000})
+    _write(root / "champion.json", {"iteration": 0, "metrics": {"challenger": {"deaths": 510}}})
+    decision = {"deaths_champion": 610, "deaths_challenger": 510, "mean_diff_end_hp": 1.59,
+                "ci_low": 1.23, "promote": True}
+    _write(root / "iter_0000" / "eval.json", {"decision": decision})
+    (root / "iter_0001" / "generated_parts").mkdir(parents=True)
+    for n in range(3):
+        (root / "iter_0001" / "generated_parts" / f"part_{n}.npz").write_bytes(b"")
+
+    (loop,) = dashboard.collect_fight_learning((("test", root),))
+
+    assert loop["plain_deaths"] == 610 and loop["best_deaths"] == 510
+    assert loop["parts_per_round"] == 250
+    first, current = loop["rounds"]
+    assert first["promoted"] is True and first["deaths_challenger"] == 510
+    assert current["deaths_challenger"] is None and current["parts"] == 3 and not current["trained"]

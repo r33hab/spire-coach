@@ -165,6 +165,12 @@
       </table></div>
     </section>
 
+    <section class="card span-12" id="fight-card">
+      <h2>Fight learning · does the fight network help?</h2>
+      <div class="explain">Each round trains a network on fights the best one so far played, then plays the same 2,000 real fights with it. Fewer deaths than plain search means the network helps; a new network is promoted only when its HP gain is clear of noise.</div>
+      <div id="fight-loops"></div>
+    </section>
+
     <section class="card span-4">
       <h2>Fidelity trend · comparable rate</h2>
       <div id="fidelity-chart"></div>
@@ -454,6 +460,25 @@ function renderRunFidelity(runs) {
   }).join("") || `<tr><td colspan="5" class="muted">Nothing compared yet.</td></tr>`;
 }
 
+function renderFight(loops) {
+  if (!loops || !loops.length) { $("fight-loops").innerHTML = `<div class="muted">No fight-learning loop found.</div>`; return; }
+  $("fight-loops").innerHTML = loops.map((l) => {
+    const head = num(l.plain_deaths) && num(l.best_deaths)
+      ? `Best network (round ${l.champion_round}): <b>${l.best_deaths}</b> deaths vs plain search <b>${l.plain_deaths}</b> (${Math.round(100 * (l.best_deaths - l.plain_deaths) / l.plain_deaths)}%)`
+      : "No network tested yet";
+    const updated = num(l.updated_at) ? " · updated " + ago(l.updated_at * 1000) : "";
+    const rows = l.rounds.slice().reverse().map((r) => {
+      if (!num(r.deaths_challenger)) {
+        const step = r.trained ? "testing" : num(r.parts) ? `generating fights ${r.parts}/${l.parts_per_round || "?"}` : "in progress";
+        return `<tr><td>${r.round}</td><td colspan="4" class="muted">${step}</td></tr>`;
+      }
+      return `<tr><td>${r.round}</td><td>${r.deaths_champion} → ${r.deaths_challenger}</td><td>${num(r.end_hp) ? (r.end_hp >= 0 ? "+" : "") + f2(r.end_hp) : "–"}</td><td>${f2(r.ci_low)}</td><td>${r.promoted ? "promoted" : "–"}</td></tr>`;
+    }).join("");
+    return `<h2 style="margin-top:14px">${esc(l.label)}</h2><div class="explain">${head}${updated}</div>` +
+      `<div class="scroll"><table><thead><tr><th>Round</th><th>Deaths (best → new)</th><th>End HP gain</th><th>CI low</th><th>Result</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  }).join("");
+}
+
 function renderFidelity(f) {
   if (!f || !f.found) {
     $("fidelity-meta").innerHTML = `No scoreboard run yet. Run <code>spire-coach fidelity-scoreboard</code>.`;
@@ -487,7 +512,7 @@ function render(d) {
   lastData = d;
   const t = d.training || {};
   renderChips(d); renderNow(t); renderChampion(t); renderTotals(t); renderCharts(t); renderGenerations(t);
-  renderCoach(d.coach || {}); renderModel(d.model); renderLog(t); renderFidelity(d.fidelity);
+  renderCoach(d.coach || {}); renderModel(d.model); renderLog(t); renderFidelity(d.fidelity); renderFight(d.fight);
 }
 
 async function tick() {
