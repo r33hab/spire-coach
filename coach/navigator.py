@@ -530,6 +530,12 @@ def _advance_crystal_sphere(client: ModClient, state: dict) -> None:
     does anything (`tool` reads "none" until then); "small" is the safer default
     (reveals less, i.e. risks less) when both are offered."""
     sphere = state.get("crystal_sphere") or {}
+    spent = not sphere.get("can_use_small_tool") and not sphere.get("can_use_big_tool")
+    if sphere.get("can_proceed") and spent:
+        # "0 Divinations remain" (live 2026-09-30, stuck ~4 h): the hidden cells are still
+        # listed as clickable, but a click with no divination left does nothing.
+        _try(client, {"action": "crystal_sphere_proceed"})
+        return
     if sphere.get("tool") in (None, "none"):
         if sphere.get("can_use_small_tool"):
             _try(client, {"action": "crystal_sphere_set_tool", "tool": "small"})

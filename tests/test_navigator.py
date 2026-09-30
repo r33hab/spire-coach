@@ -638,6 +638,26 @@ def test_advance_one_step_crystal_sphere_proceeds_once_no_cells_are_clickable():
     assert not any(a.get("action") == "crystal_sphere_click_cell" for a in mod.posted)
 
 
+def test_advance_one_step_crystal_sphere_proceeds_once_the_divinations_are_spent():
+    # Live (2026-09-30, floor 38, stuck ~4 h): "0 Divinations remain", both tools
+    # unusable and can_proceed true -- but the mod still lists the hidden cells as
+    # clickable, and a click with no divination left does nothing, forever.
+    mod = ScriptedMod()
+    mod.state_type = "crystal_sphere"
+    mod.extra_state = {
+        "crystal_sphere": {
+            "tool": "big",
+            "can_use_small_tool": False,
+            "can_use_big_tool": False,
+            "can_proceed": True,
+            "clickable_cells": [{"x": 1, "y": 2}, {"x": 2, "y": 2}],
+        }
+    }
+    advance_one_step(mod, mod.get_state())
+    assert {"action": "crystal_sphere_proceed"} in mod.posted
+    assert not any(a.get("action") == "crystal_sphere_click_cell" for a in mod.posted)
+
+
 def test_advance_one_step_fake_merchant_proceeds():
     mod = ScriptedMod()
     mod.state_type = "fake_merchant"
