@@ -7,6 +7,7 @@ import os
 import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -126,6 +127,23 @@ def test_broken_or_missing_files_show_as_missing(tmp_path: Path) -> None:
 
     assert got["generations"][0]["eval"] is None
     assert got["runs_per_generation"] is None
+
+
+def test_a_job_synced_from_another_machine_runs_while_its_files_are_fresh(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # The M5 Pro's night job, synced here (night_train.sh): its loop.pid is a process on
+    # that machine, so the local check read "loop not running" (live 2026-09-30).
+    monkeypatch.setattr(dashboard, "SYNCED_ROOTS", (tmp_path,))
+    root = _job(tmp_path / "a10")
+
+    fresh = dashboard.collect_training(root)
+    old = time.time() - dashboard.REMOTE_FRESH_S - 60
+    os.utime(root / "status.json", (old, old))
+    stale = dashboard.collect_training(root)
+
+    assert fresh["running"] is True and fresh["synced_at"] is not None
+    assert stale["running"] is False
 
 
 def test_a_dead_loop_is_not_running(tmp_path: Path) -> None:

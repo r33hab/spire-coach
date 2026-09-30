@@ -42,6 +42,14 @@ TRAINING_ROOTS = (
     Path.home() / "Documents/git/sts2-wt/training/runs/stage2",
     Path.home() / "Documents/git/sts2/runs/stage2",
 )
+# Job folders synced here from another machine (sts2 scripts/night_train.sh and
+# desktop_fight_job.sh): their loop.pid names a process over there, so "running" means
+# their files arrived within REMOTE_FRESH_S instead (they sync every 5-30 minutes).
+SYNCED_ROOTS = (
+    Path.home() / "Documents/git/sts2-wt/night",
+    Path.home() / "Documents/git/sts2-wt/desktop",
+)
+REMOTE_FRESH_S = 40 * 60
 PROBE_TIMEOUT_S = 0.8  # the game and the coach answer locally, well within this
 _LOG_LINES = 40
 _LOG_TAIL_BYTES = 64 * 1024
@@ -91,13 +99,19 @@ def collect_training(root: Path) -> dict[str, Any]:
         return {"found": False, "root": str(root)}
     config = _read_json(root / "config.json")
     loop_config = config.get("loop", {}) if isinstance(config, dict) else {}
-    pid, alive = _loop_process(root / "loop.pid")
+    synced_at = None
+    if any(root.resolve().is_relative_to(parent.resolve()) for parent in SYNCED_ROOTS):
+        pid, synced_at = None, (root / "status.json").stat().st_mtime
+        alive = time.time() - synced_at < REMOTE_FRESH_S
+    else:
+        pid, alive = _loop_process(root / "loop.pid")
     generations = [_generation(path) for path in sorted(root.glob("gen_[0-9][0-9][0-9][0-9]"))]
     return {
         "found": True,
         "root": str(root),
         "running": alive,
         "pid": pid,
+        "synced_at": synced_at,
         "status": status,
         "runs_per_generation": loop_config.get("runs_per_generation"),
         "baseline": _baseline(root, status),

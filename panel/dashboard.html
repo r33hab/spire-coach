@@ -213,7 +213,8 @@ function renderChips(d) {
   const s = t.status || {};
   const ok = t.running && s.phase !== "stopped";
   setDot("dot-train", ok ? "on" : s.phase === "done" ? "" : "warn");
-  $("chip-train").textContent = ok ? `Training: generation ${s.generation} · ${PHASE_TITLE[s.phase] || s.phase}` : `Training: ${t.running ? PHASE_TITLE[s.phase] || s.phase : "loop not running"}`;
+  const synced = t.synced_at ? " · synced " + new Date(t.synced_at * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"}) : "";
+  $("chip-train").textContent = (ok ? `Training: generation ${s.generation} · ${PHASE_TITLE[s.phase] || s.phase}` : `Training: ${t.running ? PHASE_TITLE[s.phase] || s.phase : "loop not running"}`) + synced;
 }
 
 function lastPlayingLine(log) {
