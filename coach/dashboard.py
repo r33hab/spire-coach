@@ -55,6 +55,10 @@ REMOTE_FRESH_S = 40 * 60
 # on the same 2,000 real fights; round 0's champion is plain search.
 FIGHT_ROOTS = (
     ("Desktop · teacher 300 sims", Path.home() / "Documents/git/sts2-wt/desktop/prior_loop"),
+    (
+        "Desktop · bigger network (192 wide, 3 layers)",
+        Path.home() / "Documents/git/sts2-wt/desktop/prior_loop_big",
+    ),
     ("This Mac · teacher 600 sims", Path.home() / "Documents/git/sts2/runs/prior_loop_600"),
 )
 FIGHTS_PER_PART = 40  # rl.prior_loop writes generated fights in parts of 40
