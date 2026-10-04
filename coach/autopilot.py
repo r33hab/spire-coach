@@ -37,9 +37,10 @@ from coach.engine import EngineClient, EngineError
 from coach.runlog import RunLog
 
 DEFAULT_TIME_SCALE = 3.0
-FULL_RUN_MODEL_DIR = (
-    Path.home() / "Documents" / "git" / "sts2-wt" / "training" / "runs" / "full" / "export"
-)
+# The real-A10 full-run job's champion, synced here from the M5 Pro (sts2
+# scripts/night_train.sh); the service reloads it whenever a new one is promoted. Was the
+# A9 job's (training/runs/full/export, generation 13) until 2026-10-04.
+FULL_RUN_MODEL_DIR = Path.home() / "Documents" / "git" / "sts2-wt" / "night" / "a10" / "export"
 _STEP_TIMEOUT_S = 20.0
 _MAX_SCREENS_PER_RUN = 4000  # stuck-safety cap (spec: "a timeout, then recovery")
 # Live 2026-09-29 (autopilot-20260929-002103/002138.jsonl): a start that fails -- "no
