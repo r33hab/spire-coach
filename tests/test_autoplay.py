@@ -1061,3 +1061,59 @@ def test_an_unreadable_any_number_selection_confirms_instead_of_spinning(tmp_pat
     player.play_fight(bridge.get_state())
 
     assert any(a.get("action") in ("combat_confirm_selection", "confirm_selection") for a in bridge.posted)
+
+
+def test_a_pick_already_made_is_not_pressed_again():
+    # Live 2026-10-05 (Neow's Fury, "Choose up to 2 cards to put into your Hand"): the
+    # search re-solves the screen as if nothing were picked, so after Taunt it named
+    # Taunt again -- and pressing it unpicked it. Four cards toggled on and off, then a
+    # skip: 0 cards instead of 2. Its best unpicked pick is taken instead, and when
+    # stopping ranks above every unpicked card, the picks made are kept.
+    from types import SimpleNamespace as NS
+
+    from coach.autoplay import _selection_step, unpicked_choice
+    from coach.engine import MoveStat
+
+    def stat(kind, index, covered, visits, label):
+        return MoveStat(
+            kind=kind, card_index=None, card_uid=None, card_id=None, potion_slot=None,
+            potion_id=None, target=None, select_index=index, label=label, visits=visits,
+            value_mean=None, p_death=None, paired_diff_vs_best=None,
+            paired_diff_stderr=None, paired_n=0, paired_death_diff_vs_best=None,
+            paired_death_diff_stderr=None, hand_indices=[], potion_slots=(),
+            select_indices=tuple(covered),
+        )
+
+    taunt = stat("select", 2, [2], 5316, "Choose Taunt")
+    strike_plus = stat("select", 0, [0], 2482, "Choose Strike+")
+    strikes = stat("select", 1, [1, 4], 800, "Choose Strike")
+    skip = stat("skip", None, [], 800, "Skip")
+    uids = ["STRIKE_IRONCLAD#2", "STRIKE_IRONCLAD#3", "TAUNT#0", "BECKON#0", "STRIKE_IRONCLAD#4"]
+    selection = {
+        "kind": "GRID", "min": 0, "max": 2, "can_skip": True,
+        "candidates": [{"uid": uid} for uid in uids],
+        "selected_uids": ["TAUNT#0"],
+    }
+    analysis = NS(best=taunt, moves=[taunt, strike_plus, strikes, skip])
+
+    move = unpicked_choice(selection, taunt, analysis)
+    assert move.select_index == 0 and move.label == "Choose Strike+"
+    assert _selection_step(selection, move)[1] == {"action": "select_card", "index": 0}
+
+    # A merged pick of identical cards presses one not picked yet.
+    selection["selected_uids"] = ["STRIKE_IRONCLAD#3"]
+    analysis = NS(best=strikes, moves=[strikes, skip])
+    move = unpicked_choice(selection, strikes, analysis)
+    assert move.select_index == 4 and move.card_uid == "STRIKE_IRONCLAD#4"
+
+    # Stopping ranks next: confirm with the pick made, never skip it away.
+    selection["selected_uids"] = ["TAUNT#0"]
+    stop = stat("skip", None, [], 3000, "Skip")
+    analysis = NS(best=taunt, moves=[taunt, stop, strike_plus])
+    move = unpicked_choice(selection, taunt, analysis)
+    assert move.kind == "skip"
+    assert _selection_step(selection, move)[1] == {"action": "confirm_selection"}
+
+    # Nothing picked yet: the search's own pick, untouched.
+    selection["selected_uids"] = []
+    assert unpicked_choice(selection, taunt, analysis) is taunt

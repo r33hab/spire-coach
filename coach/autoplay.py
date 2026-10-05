@@ -128,6 +128,36 @@ def playable_choice(state: dict, analysis, refused: frozenset | set = frozenset(
     return _END_TURN if fallback is None else _plain_move(fallback)
 
 
+def unpicked_choice(selection: dict, move: Move, analysis) -> Move:
+    """The search's best pick on a multi-pick screen that is not picked already.
+
+    The engine re-solves the screen as if nothing were picked yet (the emulator's screen
+    starts empty: `sts2_gym.live.selection`), so after its first pick it names that same
+    card again -- and pressing a picked card on a grid unpicks it. Live 2026-10-05,
+    Neow's Fury's "up to 2 cards": Taunt, Strike+, Strike and Beckon each toggled on and
+    off, then a skip, so 0 cards instead of 2. Instead: the most-visited move that picks
+    a card not picked yet (of a merged pick of identical cards, one not picked yet), or,
+    when stopping ranks first, that stop -- which `_selection_step` turns into a confirm
+    that keeps the picks made.
+    """
+    picked_uids = set(selection.get("selected_uids") or [])
+    if move.kind != "select" or not picked_uids:
+        return move
+    candidates = selection.get("candidates") or []
+    picked = {i for i, card in enumerate(candidates) if card.get("uid") in picked_uids}
+    for option in [move, *sorted(analysis.moves, key=lambda m: m.visits, reverse=True)]:
+        if option.kind != "select":
+            return _plain_move(option)
+        covered = getattr(option, "select_indices", None) or (option.select_index,)
+        free = [i for i in covered if i is not None and i not in picked]
+        if free:
+            uid = candidates[free[0]].get("uid") if free[0] < len(candidates) else None
+            return dataclasses.replace(
+                _plain_move(option), select_index=free[0], card_uid=uid or option.card_uid
+            )
+    return dataclasses.replace(_NO_ENGINE_MOVE, kind="skip", label="every pick the search wants is made")
+
+
 _END_TURN = Move(
     kind="end_turn",
     card_index=None,
@@ -607,6 +637,7 @@ class MovePlayer:
         move = playable_choice(state, analysis, refused)
         if decision.kind is DecisionKind.COMBAT_SELECT:
             selection = live.get("pending_selection") or {}
+            move = unpicked_choice(selection, move, analysis)
             move, action = _selection_step(selection, move)
         else:
             action = move_to_action(move)
