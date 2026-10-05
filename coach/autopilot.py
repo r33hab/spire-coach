@@ -470,12 +470,17 @@ class RewardClaimer:
     dying at the Act 1 boss (live 2026-10-05). A card reward opens the card choice, where
     the strategy picks a card or skips (`card.take` / `card.skip`).
 
+    A card the Thieving Hopper stole comes back the same way: killing it puts a
+    "special_card" item on the rewards screen, and only claiming it puts the card back in
+    the deck (the game's `SwipePower.BeforeDeath` / `SpecialCardReward.OnSelect`); the
+    simulator returns it without asking.
+
     Counted per floor and kind, so a skipped card reward (which stays on the screen), or
     a claim the game ignores, is not tried again, and a second one on the same floor
     (Prayer Wheel) is claimed too.
     """
 
-    KINDS = ("gold", "card")
+    KINDS = ("gold", "special_card", "card")
 
     def __init__(self) -> None:
         self._floor: tuple | None = None

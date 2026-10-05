@@ -642,3 +642,18 @@ def test_play_screen_claims_gold_and_opens_a_card_reward_once_before_anything_el
     assert engine.calls == []
     assert rewards.to_claim(_rewards_screen()) is None  # both tried on this floor
     assert rewards.to_claim(_rewards_screen(floor=6))["index"] == 0  # a new floor's gold
+
+
+def test_a_card_the_thief_stole_is_claimed_back():
+    # Killing the Thieving Hopper puts the stolen card on the rewards screen as a
+    # "special_card" item; left unclaimed, the card is gone for good.
+    from coach.autopilot import RewardClaimer
+
+    screen = {
+        "state_type": "rewards",
+        "run": {"act": 1, "floor": 7},
+        "rewards": {"items": [{"index": 0, "type": "special_card"}, {"index": 1, "type": "potion"}]},
+    }
+    rewards = RewardClaimer()
+    assert rewards.to_claim(screen) == {"index": 0, "type": "special_card"}
+    assert rewards.to_claim(screen) is None  # the potion is the strategy's to decide
