@@ -473,6 +473,16 @@ def cmd_fight_lab(
     return 0
 
 
+def autopilot_engine_env(*, deck_rollouts: bool, prior_dir: Path | None) -> dict[str, str]:
+    """The engine service's environment for the autopilot: the full-run champion, and
+    measured fights at deck decisions when asked (sts2 `deckfights`)."""
+    env = {"STS2_STRATEGY_MODEL_DIR": str(autopilot.FULL_RUN_MODEL_DIR)}
+    if deck_rollouts:
+        env["STS2_DECK_ROLLOUTS"] = "1"
+        env["STS2_DECK_ROLLOUT_PRIOR"] = str(prior_dir or "")
+    return env
+
+
 def cmd_autopilot(
     config: Config,
     *,
@@ -489,6 +499,7 @@ def cmd_autopilot(
     client_factory: Callable[[str, str | None], ModClient] | None = None,
     engine_factory: Callable[[], EngineClient] | None = None,
     fresh_run: bool = False,
+    deck_rollouts: bool = False,
 ) -> int:
     """Play `runs` whole real runs unattended, Ironclad at `ascension`, using the fight
     lab's own move player and recording between real fights too (see coach.autopilot).
@@ -509,7 +520,7 @@ def cmd_autopilot(
             or (
                 lambda: EngineClient(
                     workers=workers,
-                    extra_env={"STS2_STRATEGY_MODEL_DIR": str(autopilot.FULL_RUN_MODEL_DIR)},
+                    extra_env=autopilot_engine_env(deck_rollouts=deck_rollouts, prior_dir=prior_dir),
                     prior_dir=prior_dir,
                 )
             )
@@ -1148,6 +1159,11 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     _add_prior_option(autopilot_parser)
+    autopilot_parser.add_argument(
+        "--deck-rollouts",
+        action="store_true",
+        help="measure deck decisions with paired simulated fights (slower; sts2 deckfights)",
+    )
 
     return parser
 
@@ -1248,6 +1264,7 @@ def main(argv: list[str] | None = None) -> int:
                 auto_kill_rounds=args.auto_kill_rounds,
                 fresh_run=args.fresh_run,
                 prior=args.prior,
+                deck_rollouts=args.deck_rollouts,
             )
     except navigator.NavigatorError as exc:
         print(str(exc), file=sys.stderr)

@@ -1516,3 +1516,24 @@ def test_sigterm_and_sighup_stop_the_coach_in_order_as_ctrl_c_does(tmp_path, sig
 
     assert run.steps == ["waited"]
     run.assert_all_stopped()
+
+
+def test_deck_rollouts_reach_the_engine_environment():
+    from pathlib import Path
+
+    from coach import cli
+
+    env = cli.autopilot_engine_env(deck_rollouts=True, prior_dir=Path("/prior"))
+    assert env["STS2_DECK_ROLLOUTS"] == "1"
+    assert env["STS2_DECK_ROLLOUT_PRIOR"] == "/prior"
+    assert "STS2_STRATEGY_MODEL_DIR" in env
+    plain = cli.autopilot_engine_env(deck_rollouts=False, prior_dir=None)
+    assert "STS2_DECK_ROLLOUTS" not in plain
+
+
+def test_the_autopilot_parser_has_deck_rollouts():
+    from coach import cli
+
+    args = cli._build_parser().parse_args(["autopilot", "--deck-rollouts"])
+    assert args.deck_rollouts is True
+    assert cli._build_parser().parse_args(["autopilot"]).deck_rollouts is False
