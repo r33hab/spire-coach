@@ -372,6 +372,7 @@ def _play_run(
     acts_reached = navigator.act_of(state) or 1
     tracker = LiveRunTracker()
     event_guard = EventLoopGuard()
+    card_opener = CardRewardOpener()
     for _ in range(_MAX_SCREENS_PER_RUN):
         if stop():
             break
@@ -422,7 +423,7 @@ def _play_run(
                 acts_reached=acts_reached,
                 buffered=buffered,
             )
-        _play_screen(client, engine, tracker, state, runlog, event_guard)
+        _play_screen(client, engine, tracker, state, runlog, event_guard, card_opener)
     raise navigator.NavigatorError(
         f"autopilot: {_MAX_SCREENS_PER_RUN} screens without the run ending"
     )
@@ -458,6 +459,43 @@ class EventLoopGuard:
         return None
 
 
+class CardRewardOpener:
+    """Open each card reward on a rewards screen once, before the strategy is asked.
+
+    A card reward is an item on the rewards screen that opens the card choice, where the
+    strategy picks a card or skips (`card.take` / `card.skip`). Its options on the rewards
+    screen itself are only potions, relics and proceed, and the generic fallback claims
+    only gold, potions and relics -- so nothing ever opened it, and proceeding left the
+    cards behind: 0 of 1,090 card rewards taken in every autopilot run since 2026-09-29,
+    each run a starter deck dying at the Act 1 boss (live 2026-10-05).
+
+    Counted per floor, so a skipped reward (which stays on the screen) is not reopened,
+    and a second one on the same floor (Prayer Wheel) is opened too.
+    """
+
+    def __init__(self) -> None:
+        self._floor: tuple | None = None
+        self._opened = 0
+        self._most = 0
+
+    def to_open(self, state: dict) -> dict | None:
+        if state.get("state_type") != "rewards":
+            return None
+        items = (state.get("rewards") or {}).get("items") or []
+        cards = [item for item in items if item.get("type") == "card"]
+        run = state.get("run") or {}
+        floor = (run.get("act"), run.get("floor"))
+        if floor != self._floor:
+            self._floor, self._opened, self._most = floor, 0, 0
+        self._most = max(self._most, len(cards))
+        if not cards or self._opened >= self._most:
+            return None
+        # A taken reward leaves the screen, a skipped one stays: the next unopened one is
+        # at `_opened` if the skipped ones stayed, otherwise the last one left.
+        self._opened += 1
+        return cards[min(self._opened - 1, len(cards) - 1)]
+
+
 def _play_screen(
     client: ModClient,
     engine: EngineClient,
@@ -465,7 +503,15 @@ def _play_screen(
     state: dict,
     runlog: RunLog,
     event_guard: EventLoopGuard | None = None,
+    card_opener: CardRewardOpener | None = None,
 ) -> None:
+    card = card_opener.to_open(state) if card_opener is not None else None
+    if card is not None:
+        try:
+            client.post_action({"action": "claim_reward", "index": card["index"]})
+            return
+        except BridgeError as exc:
+            runlog.append("error", {"error": f"autopilot: opening a card reward failed: {exc}"})
     way_out = event_guard.way_out(state) if event_guard is not None else None
     if way_out is not None:
         event_id = (state.get("event") or {}).get("event_id")
