@@ -372,7 +372,7 @@ def _play_run(
     acts_reached = navigator.act_of(state) or 1
     tracker = LiveRunTracker()
     event_guard = EventLoopGuard()
-    card_opener = CardRewardOpener()
+    rewards = RewardClaimer()
     for _ in range(_MAX_SCREENS_PER_RUN):
         if stop():
             break
@@ -423,7 +423,7 @@ def _play_run(
                 acts_reached=acts_reached,
                 buffered=buffered,
             )
-        _play_screen(client, engine, tracker, state, runlog, event_guard, card_opener)
+        _play_screen(client, engine, tracker, state, runlog, event_guard, rewards)
     raise navigator.NavigatorError(
         f"autopilot: {_MAX_SCREENS_PER_RUN} screens without the run ending"
     )
@@ -459,41 +459,47 @@ class EventLoopGuard:
         return None
 
 
-class CardRewardOpener:
-    """Open each card reward on a rewards screen once, before the strategy is asked.
+class RewardClaimer:
+    """Claim the gold and open each card reward on a rewards screen once, before the
+    strategy is asked.
 
-    A card reward is an item on the rewards screen that opens the card choice, where the
-    strategy picks a card or skips (`card.take` / `card.skip`). Its options on the rewards
-    screen itself are only potions, relics and proceed, and the generic fallback claims
-    only gold, potions and relics -- so nothing ever opened it, and proceeding left the
-    cards behind: 0 of 1,090 card rewards taken in every autopilot run since 2026-09-29,
-    each run a starter deck dying at the Act 1 boss (live 2026-10-05).
+    The simulator claims both without asking (rl/run_train/features.py `_live_rewards`),
+    so the strategy's rewards options are only potions, relics and proceed -- and nothing
+    here claimed them either: proceeding left the gold behind, and the cards: 0 of 1,090
+    card rewards taken in every autopilot run since 2026-09-29, each run a starter deck
+    dying at the Act 1 boss (live 2026-10-05). A card reward opens the card choice, where
+    the strategy picks a card or skips (`card.take` / `card.skip`).
 
-    Counted per floor, so a skipped reward (which stays on the screen) is not reopened,
-    and a second one on the same floor (Prayer Wheel) is opened too.
+    Counted per floor and kind, so a skipped card reward (which stays on the screen), or
+    a claim the game ignores, is not tried again, and a second one on the same floor
+    (Prayer Wheel) is claimed too.
     """
+
+    KINDS = ("gold", "card")
 
     def __init__(self) -> None:
         self._floor: tuple | None = None
-        self._opened = 0
-        self._most = 0
+        self._claimed: dict[str, int] = {}
+        self._most: dict[str, int] = {}
 
-    def to_open(self, state: dict) -> dict | None:
+    def to_claim(self, state: dict) -> dict | None:
         if state.get("state_type") != "rewards":
             return None
         items = (state.get("rewards") or {}).get("items") or []
-        cards = [item for item in items if item.get("type") == "card"]
         run = state.get("run") or {}
         floor = (run.get("act"), run.get("floor"))
         if floor != self._floor:
-            self._floor, self._opened, self._most = floor, 0, 0
-        self._most = max(self._most, len(cards))
-        if not cards or self._opened >= self._most:
-            return None
-        # A taken reward leaves the screen, a skipped one stays: the next unopened one is
-        # at `_opened` if the skipped ones stayed, otherwise the last one left.
-        self._opened += 1
-        return cards[min(self._opened - 1, len(cards) - 1)]
+            self._floor, self._claimed, self._most = floor, {}, {}
+        for kind in self.KINDS:
+            found = [item for item in items if item.get("type") == kind and "index" in item]
+            claimed = self._claimed.get(kind, 0)
+            self._most[kind] = most = max(self._most.get(kind, 0), len(found))
+            if found and claimed < most:
+                # A claimed item leaves the screen, a skipped card reward stays: the next
+                # unclaimed one is at `claimed` if the skipped ones stayed, else the last.
+                self._claimed[kind] = claimed + 1
+                return found[min(claimed, len(found) - 1)]
+        return None
 
 
 def _play_screen(
@@ -503,15 +509,15 @@ def _play_screen(
     state: dict,
     runlog: RunLog,
     event_guard: EventLoopGuard | None = None,
-    card_opener: CardRewardOpener | None = None,
+    rewards: RewardClaimer | None = None,
 ) -> None:
-    card = card_opener.to_open(state) if card_opener is not None else None
-    if card is not None:
+    item = rewards.to_claim(state) if rewards is not None else None
+    if item is not None:
         try:
-            client.post_action({"action": "claim_reward", "index": card["index"]})
+            client.post_action({"action": "claim_reward", "index": item["index"]})
             return
         except BridgeError as exc:
-            runlog.append("error", {"error": f"autopilot: opening a card reward failed: {exc}"})
+            runlog.append("error", {"error": f"autopilot: claiming a {item['type']} reward failed: {exc}"})
     way_out = event_guard.way_out(state) if event_guard is not None else None
     if way_out is not None:
         event_id = (state.get("event") or {}).get("event_id")
@@ -549,7 +555,23 @@ def _play_screen(
             runlog.append(
                 "strategy", {"state_type": state.get("state_type"), "error": str(exc)}
             )
-    if result is not None and strategyplay.execute_best_option(client, state, result):
+    executed = result is not None and strategyplay.execute_best_option(client, state, result)
+    if result is not None:
+        run = state.get("run") or {}
+        runlog.append(
+            "strategy",
+            {
+                "state_type": state.get("state_type"),
+                "act": run.get("act"),
+                "floor": run.get("floor"),
+                "gold": (state.get("player") or {}).get("gold"),
+                "options": [
+                    {"label": o.get("label"), "value": o.get("value")} for o in result.options[:5]
+                ],
+                "executed": executed,
+            },
+        )
+    if executed:
         return
     navigator.advance_one_step(client, state, runlog=runlog)
 

@@ -613,12 +613,12 @@ def _rewards_screen(floor: int = 5) -> dict:
     }
 
 
-def test_play_screen_opens_a_card_reward_once_before_anything_else(tmp_path):
+def test_play_screen_claims_gold_and_opens_a_card_reward_once_before_anything_else(tmp_path):
     # The card reward is an item on the rewards screen that opens the three-card choice.
     # Neither the strategy's reward options (potion, relic, proceed) nor the fallback's
     # takeable types (gold, potion, relic) ever opened it, so every autopilot run since
     # 09-29 skipped every card. Opened once per floor: after a skip it is not reopened.
-    from coach.autopilot import CardRewardOpener, _play_screen
+    from coach.autopilot import RewardClaimer, _play_screen
     from coach.runlog import RunLog
 
     class Poster:
@@ -629,12 +629,16 @@ def test_play_screen_opens_a_card_reward_once_before_anything_else(tmp_path):
             self.posted.append(action)
             return {"status": "ok"}
 
-    opener = CardRewardOpener()
+    rewards = RewardClaimer()
     client, engine = Poster(), StubEngine()
     runlog = RunLog(tmp_path, subdir="runs", prefix="test-")
 
-    _play_screen(client, engine, None, _rewards_screen(), runlog, None, opener)
-    assert client.posted == [{"action": "claim_reward", "index": 1}]
+    _play_screen(client, engine, None, _rewards_screen(), runlog, None, rewards)
+    _play_screen(client, engine, None, _rewards_screen(), runlog, None, rewards)
+    assert client.posted == [
+        {"action": "claim_reward", "index": 0},  # the gold
+        {"action": "claim_reward", "index": 1},  # the card reward
+    ]
     assert engine.calls == []
-    assert opener.to_open(_rewards_screen()) is None  # already opened on this floor
-    assert opener.to_open(_rewards_screen(floor=6))["index"] == 1  # a new floor's reward
+    assert rewards.to_claim(_rewards_screen()) is None  # both tried on this floor
+    assert rewards.to_claim(_rewards_screen(floor=6))["index"] == 0  # a new floor's gold

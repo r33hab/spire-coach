@@ -59,7 +59,7 @@ def test_empty_options_falls_back():
 
 def test_unmapped_kind_falls_back():
     client = FakeClient()
-    assert execute_best_option(client, {}, result_for("select.upgrade", deck_index=0)) is False
+    assert execute_best_option(client, {}, result_for("sphere.cell", action=0)) is False
     assert client.posted == []
 
 
@@ -190,17 +190,65 @@ def test_bridge_error_falls_back_instead_of_raising():
     assert execute_best_option(client, {}, result_for("card.skip")) is False
 
 
-def test_no_shop_purchase_kind_is_ever_mapped():
-    # The training design's real kind names (rl/run_train/features.py OPTION_KINDS) are
-    # "shop.card"/"shop.relic"/"shop.potion"/"shop.remove" -- not "shop.buy_*", which
-    # never appears; this test used to assert against kinds the engine never sends.
-    # Shop buys and card removal are not yet checked live end to end (task item 4), so
-    # only shop.leave is mapped; the rest still falls back to the generic policy, which
-    # never buys or removes anything either.
-    client = FakeClient()
+def test_shop_buys_and_the_removal_are_bought_by_the_shop_item_index():
+    # Live 2026-10-05: every shop was left without buying anything -- these kinds fell
+    # to the fallback, which only proceeds. `action` is the shop item's own index
+    # (features.py `_live_shop`), what `shop_purchase` takes.
     for kind in ("shop.card", "shop.relic", "shop.potion", "shop.remove"):
-        assert execute_best_option(client, {}, result_for(kind, deck_index=0)) is False
-    assert client.posted == []
+        client = FakeClient()
+        assert execute_best_option(client, {}, result_for(kind, action=3, deck_index=0)) is True
+        assert client.posted == [{"action": "shop_purchase", "index": 3}]
+
+
+def test_rest_options_are_the_models_pick_not_the_first_enabled_one():
+    for kind in ("rest.heal", "rest.smith", "rest.lift", "rest.dig"):
+        client = FakeClient()
+        assert execute_best_option(client, {}, result_for(kind, action=1)) is True
+        assert client.posted == [{"action": "choose_rest_option", "index": 1}]
+
+
+def test_event_options_are_the_models_pick_not_the_first_open_one():
+    client = FakeClient()
+    result = result_for("event.option", action=2, event=[17, 2, 0])
+    assert execute_best_option(client, {}, result) is True
+    assert client.posted == [{"action": "choose_event_option", "index": 2}]
+
+
+def test_deck_screens_take_the_models_card():
+    # A rest site's Smith, a shop's or an event's removal, a transform: features.py
+    # names these screens' cards select.upgrade/select.remove/..., not select.offer, so
+    # they fell to the fallback's first card -- Smith upgraded whatever came first.
+    for kind in ("select.upgrade", "select.remove", "select.transform", "select.duplicate"):
+        client = FakeClient()
+        state = {"card_select": {"cards": [{"index": 0}, {"index": 4}], "max_select": 1}}
+        assert execute_best_option(client, state, result_for(kind, action=4)) is True
+        assert client.posted == [{"action": "select_card", "index": 4}]
+
+
+def test_an_action_the_mod_refuses_falls_back():
+    class Refusing(FakeClient):
+        def post_action(self, action: dict, **kwargs) -> dict:
+            self.posted.append(action)
+            return {"status": "error", "error": "Not enough gold"}
+
+    client = Refusing()
+    assert execute_best_option(client, {}, result_for("rest.heal", action=0)) is False
+    client = Refusing()  # a shop buy is tried 3 times (the inventory opens on the first)
+    assert execute_best_option(client, {}, result_for("shop.card", action=0)) is False
+    assert len(client.posted) == 3
+
+
+def test_a_shop_buy_waits_for_the_inventory_to_open():
+    class Opening(FakeClient):
+        def post_action(self, action: dict, **kwargs) -> dict:
+            self.posted.append(action)
+            if len(self.posted) == 1:
+                return {"status": "error", "error": "Shop inventory not ready yet"}
+            return {"status": "ok"}
+
+    client = Opening()
+    assert execute_best_option(client, {}, result_for("shop.relic", action=5)) is True
+    assert client.posted == [{"action": "shop_purchase", "index": 5}] * 2
 
 
 def test_an_ancient_relic_offer_on_an_event_screen_uses_choose_event_option():

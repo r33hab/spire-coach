@@ -21,12 +21,15 @@ cannot place arrives as an `unknown`-kind option upstream (`rl/run_train/feature
 `options[0]` unless every offered card is unrecognized -- this module never needs its
 own extra guard for that case.
 
-Still never maps a shop purchase (`shop.card`/`shop.relic`/`shop.potion`, the training
-design's real kind names -- `rl/run_train/features.py` OPTION_KINDS; there is no
-`shop.buy_*`) or a shop removal (`shop.remove`): unlike a card reward, a shop's offered
-cards and their prices are not yet checked live end to end, so this module leaves the
-whole shop screen (besides `shop.leave`) to the generic fallback, which never buys
-anything, until that path is verified.
+Shop buys and the removal (`shop.card`/`shop.relic`/`shop.potion`/`shop.remove`),
+rest-site options (`rest.*`), event options (`event.option`) and the deck screens that
+follow them (`select.upgrade`/`select.remove`/`select.transform`/...) are the model's
+pick too: each `action` is the live screen's own index (`rl/run_train/features.py`
+`_live_shop`/`_live_rest`/`_live_event`/`_live_card_select`), what `shop_purchase`,
+`choose_rest_option`, `choose_event_option` and `select_card` take. Until 2026-10-05
+they fell to the generic fallback, which never bought anything, rested or took an
+event's first option whatever the model said, and upgraded or removed the first card.
+An action the mod refuses (an error response) falls back too.
 
 `neow.relic` and `select.offer` (bug 7/7: Neow's relic pick and every card_select
 screen's own offered cards -- a rest site's Smith upgrade, a shop's removal, an event's
@@ -42,6 +45,8 @@ to check it against, so getting either wrong risks a silently-accepted bad actio
 
 from __future__ import annotations
 
+import time
+
 from coach import navigator
 from coach.bridge.client import BridgeError, ModClient
 from coach.engine import StrategyResult
@@ -56,6 +61,12 @@ _NODE_TYPE_NAMES = {
     7: "Unknown",
     8: "Ancient",
 }
+
+
+_SHOP_BUYS = frozenset({"shop.card", "shop.relic", "shop.potion", "shop.remove"})
+_DECK_PICKS = frozenset(
+    {"select.upgrade", "select.remove", "select.transform", "select.duplicate", "select.enchant"}
+)
 
 
 def execute_best_option(client: ModClient, state: dict, result: StrategyResult | None) -> bool:
@@ -83,6 +94,18 @@ def _execute(client: ModClient, state: dict, kind: str, option: dict) -> bool:
         return _take_card_reward(client, option)
     if kind in ("reward.potion", "reward.relic"):
         return _claim_reward(client, state, kind)
+    if kind in _SHOP_BUYS:
+        # The mod opens the shop's inventory on the first purchase and can answer "not
+        # ready yet, retry" while it does (McpMod.Actions.cs ExecuteShopPurchase).
+        for _ in range(3):
+            if _index_action(client, option, "shop_purchase", "index"):
+                return True
+            time.sleep(0.5)
+        return False
+    if kind.startswith("rest.") and kind != "rest.leave":
+        return _index_action(client, option, "choose_rest_option", "index")
+    if kind == "event.option":
+        return _index_action(client, option, "choose_event_option", "index")
     if kind in ("reward.proceed", "shop.leave", "rest.leave"):
         return _post(client, {"action": "proceed"})
     if kind == "select.offer_done":
@@ -96,7 +119,7 @@ def _execute(client: ModClient, state: dict, kind: str, option: dict) -> bool:
                 return False  # a locked option is refused: the fallback takes an open one
             return _index_action(client, option, "choose_event_option", "index")
         return _index_action(client, option, "select_relic", "index")
-    if kind == "select.offer":
+    if kind == "select.offer" or kind in _DECK_PICKS:
         grid = state.get("card_select") or {}
         cards = grid.get("cards") or []
         chosen = sum(1 for card in cards if card.get("selected"))
@@ -184,5 +207,5 @@ def _claim_reward(client: ModClient, state: dict, kind: str) -> bool:
 
 
 def _post(client: ModClient, action: dict) -> bool:
-    client.post_action(action)
-    return True
+    response = client.post_action(action)
+    return not (isinstance(response, dict) and response.get("status") == "error")
