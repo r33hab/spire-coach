@@ -273,3 +273,9 @@ def test_a_potion_reward_with_a_full_belt_is_left_to_the_fallback():
     client = FakeClient()
     assert execute_best_option(client, state, result_for("reward.potion")) is False
     assert client.posted == []
+
+
+def test_a_stolen_card_offered_back_is_claimed_when_the_model_takes_it():
+    client = FakeClient()
+    assert execute_best_option(client, {}, result_for("reward.card", action=2)) is True
+    assert client.posted == [{"action": "claim_reward", "index": 2}]

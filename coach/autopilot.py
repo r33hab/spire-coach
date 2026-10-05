@@ -470,17 +470,23 @@ class RewardClaimer:
     dying at the Act 1 boss (live 2026-10-05). A card reward opens the card choice, where
     the strategy picks a card or skips (`card.take` / `card.skip`).
 
-    A card the Thieving Hopper stole comes back the same way: killing it puts a
-    "special_card" item on the rewards screen, and only claiming it puts the card back in
-    the deck (the game's `SwipePower.BeforeDeath` / `SpecialCardReward.OnSelect`); the
-    simulator returns it without asking.
+    A card the Thieving Hopper stole comes back as a "special_card" item, and only
+    claiming it puts it back in the deck (the game's `SwipePower.BeforeDeath` /
+    `SpecialCardReward.OnSelect`). That is the model's call (`reward.card`: a weak card
+    left behind is a free removal) once the mod says which card it is; an item without
+    its card (an older mod) is claimed here, as the simulator returns it without asking.
+
+    A potion is claimed whenever a slot is free: one held costs nothing (it can be
+    thrown away for a better one), yet the strategy sometimes scored leaving it higher
+    -- a Flex Potion left behind with two empty slots (live 2026-10-05) -- and never took
+    one it could not score. A full belt leaves it to the strategy.
 
     Counted per floor and kind, so a skipped card reward (which stays on the screen), or
     a claim the game ignores, is not tried again, and a second one on the same floor
     (Prayer Wheel) is claimed too.
     """
 
-    KINDS = ("gold", "special_card", "card")
+    KINDS = ("gold", "special_card", "potion", "card")
 
     def __init__(self) -> None:
         self._floor: tuple | None = None
@@ -496,7 +502,14 @@ class RewardClaimer:
         if floor != self._floor:
             self._floor, self._claimed, self._most = floor, {}, {}
         for kind in self.KINDS:
-            found = [item for item in items if item.get("type") == kind and "index" in item]
+            if kind == "potion" and navigator.potion_belt_full(state):
+                continue
+            found = [
+                item
+                for item in items
+                if item.get("type") == kind and "index" in item
+                and not (kind == "special_card" and item.get("card"))
+            ]
             claimed = self._claimed.get(kind, 0)
             self._most[kind] = most = max(self._most.get(kind, 0), len(found))
             if found and claimed < most:

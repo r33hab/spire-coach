@@ -94,6 +94,9 @@ def _execute(client: ModClient, state: dict, kind: str, option: dict) -> bool:
         return _take_card_reward(client, option)
     if kind in ("reward.potion", "reward.relic"):
         return _claim_reward(client, state, kind)
+    if kind == "reward.card":
+        # A card a Thieving Hopper stole, offered back: `action` is the item's index.
+        return _index_action(client, option, "claim_reward", "index")
     if kind in _SHOP_BUYS:
         # The mod opens the shop's inventory on the first purchase and can answer "not
         # ready yet, retry" while it does (McpMod.Actions.cs ExecuteShopPurchase).

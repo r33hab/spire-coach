@@ -656,4 +656,25 @@ def test_a_card_the_thief_stole_is_claimed_back():
     }
     rewards = RewardClaimer()
     assert rewards.to_claim(screen) == {"index": 0, "type": "special_card"}
-    assert rewards.to_claim(screen) is None  # the potion is the strategy's to decide
+
+    # Once the mod says which card it is, taking it back is the model's call
+    # (`reward.card`): a weak card left behind is a free removal.
+    screen["rewards"]["items"][0]["card"] = {"id": "STRIKE_IRONCLAD", "index": 0}
+    assert RewardClaimer().to_claim(screen) == {"index": 1, "type": "potion"}
+
+
+def test_a_potion_is_taken_whenever_a_slot_is_free():
+    # Live 2026-10-05: a Flex Potion left behind with two empty slots. Holding one costs
+    # nothing (it can be thrown away for a better one); a full belt is the strategy's.
+    from coach.autopilot import RewardClaimer
+
+    def screen(held: int) -> dict:
+        return {
+            "state_type": "rewards",
+            "run": {"act": 1, "floor": 4},
+            "player": {"max_potion_slots": 2, "potions": [{"id": "FIRE_POTION"}] * held},
+            "rewards": {"items": [{"index": 0, "type": "potion", "potion_id": "FLEX_POTION"}]},
+        }
+
+    assert RewardClaimer().to_claim(screen(held=1))["index"] == 0
+    assert RewardClaimer().to_claim(screen(held=2)) is None
