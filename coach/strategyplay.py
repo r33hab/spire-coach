@@ -78,9 +78,29 @@ def execute_best_option(client: ModClient, state: dict, result: StrategyResult |
     option = result.options[0].get("option") or {}
     kind = str(option.get("kind") or "")
     try:
+        if kind in _DECK_PICKS and result.options[0].get("value") is None:
+            # Nothing on this deck screen could be scored (an enchant: the screen does not
+            # name the enchantment), so its first option is only the grid's first card --
+            # a Strike, enchanted over and over (live 2026-10-05).
+            return _pick_rarest(client, state)
         return _execute(client, state, kind, option)
     except BridgeError:
         return False
+
+
+_RARITY = {"Basic": 0, "Common": 1, "Uncommon": 2, "Rare": 3}
+
+
+def _pick_rarest(client: ModClient, state: dict) -> bool:
+    """An unscored deck pick: the rarest card offered, the first of those -- a stand-in
+    until the model can score it, which at least never spends it on a starter card when
+    anything else is offered."""
+    grid = state.get("card_select") or {}
+    cards = [c for c in grid.get("cards") or [] if not c.get("selected") and "index" in c]
+    if not cards:
+        return False
+    best = max(cards, key=lambda c: _RARITY.get(str(c.get("rarity")), 1))
+    return _post(client, {"action": "select_card", "index": best["index"]})
 
 
 def _execute(client: ModClient, state: dict, kind: str, option: dict) -> bool:

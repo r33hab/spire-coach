@@ -304,3 +304,20 @@ def test_a_potion_swap_throws_away_the_named_potion_then_takes_the_new_one():
     result = result_for("reward.potion_swap", action=3, discard="SWIFT_POTION")
     assert execute_best_option(client, state, result) is False
     assert client.posted == []
+
+
+def test_an_unscored_deck_pick_takes_the_rarest_card_not_the_first():
+    # Live 2026-10-05: an enchant screen is never scorable, and its first option -- the
+    # grid's first card, a Strike -- was enchanted every time.
+    state = {"card_select": {"cards": [
+        {"index": 0, "id": "STRIKE_IRONCLAD", "rarity": "Basic"},
+        {"index": 1, "id": "POMMEL_STRIKE", "rarity": "Common"},
+        {"index": 2, "id": "DEMON_FORM", "rarity": "Rare"},
+    ]}}
+    result = StrategyResult(
+        options=[{"option": {"kind": "select.enchant", "action": 0}, "label": "x", "value": None, "p_boss": None}],
+        model={},
+    )
+    client = FakeClient()
+    assert execute_best_option(client, state, result) is True
+    assert client.posted == [{"action": "select_card", "index": 2}]
