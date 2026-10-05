@@ -279,3 +279,28 @@ def test_a_stolen_card_offered_back_is_claimed_when_the_model_takes_it():
     client = FakeClient()
     assert execute_best_option(client, {}, result_for("reward.card", action=2)) is True
     assert client.posted == [{"action": "claim_reward", "index": 2}]
+
+
+def test_a_potion_swap_throws_away_the_named_potion_then_takes_the_new_one():
+    state = {"player": {"potions": [
+        {"id": "BLOCK_POTION", "slot": 0}, {"id": "FIRE_POTION", "slot": 1},
+    ]}}
+    client = FakeClient()
+    result = result_for("reward.potion_swap", action=3, discard="FIRE_POTION")
+    assert execute_best_option(client, state, result) is True
+    assert client.posted == [
+        {"action": "discard_potion", "slot": 1},
+        {"action": "claim_reward", "index": 3},
+    ]
+    client = FakeClient()
+    result = result_for("shop.potion_swap", action=6, discard="BLOCK_POTION")
+    assert execute_best_option(client, state, result) is True
+    assert client.posted == [
+        {"action": "discard_potion", "slot": 0},
+        {"action": "shop_purchase", "index": 6},
+    ]
+    # A potion no longer held: nothing is thrown away.
+    client = FakeClient()
+    result = result_for("reward.potion_swap", action=3, discard="SWIFT_POTION")
+    assert execute_best_option(client, state, result) is False
+    assert client.posted == []

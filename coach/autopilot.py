@@ -373,6 +373,7 @@ def _play_run(
     tracker = LiveRunTracker()
     event_guard = EventLoopGuard()
     rewards = RewardClaimer()
+    patience = ScreenPatience()
     for _ in range(_MAX_SCREENS_PER_RUN):
         if stop():
             break
@@ -423,7 +424,7 @@ def _play_run(
                 acts_reached=acts_reached,
                 buffered=buffered,
             )
-        _play_screen(client, engine, tracker, state, runlog, event_guard, rewards)
+        _play_screen(client, engine, tracker, state, runlog, event_guard, rewards, patience)
     raise navigator.NavigatorError(
         f"autopilot: {_MAX_SCREENS_PER_RUN} screens without the run ending"
     )
@@ -520,6 +521,38 @@ class RewardClaimer:
         return None
 
 
+class ScreenPatience:
+    """Wait for a rest site's buttons before deciding on it.
+
+    The mod lists a rest site's options before the game has drawn their buttons
+    (`has_button` false), and the strategy offers none of those (features.py
+    `_live_rest`), so the fallback took the first enabled option instead: on 3 of 5
+    rest sites in one batch, the one before the Act 1 boss among them (live 2026-10-05).
+    Up to `limit` waits a floor, then the fallback acts as before.
+    """
+
+    def __init__(self, limit: int = 20, wait_s: float = 0.5) -> None:
+        self.limit, self.wait_s = limit, wait_s
+        self._floor: tuple | None = None
+        self._waits = 0
+
+    def wait(self, state: dict) -> bool:
+        if state.get("state_type") != "rest_site":
+            return False
+        options = (state.get("rest_site") or {}).get("options") or []
+        if not any(o.get("is_enabled") and o.get("has_button") is False for o in options):
+            return False
+        run = state.get("run") or {}
+        floor = (run.get("act"), run.get("floor"))
+        if floor != self._floor:
+            self._floor, self._waits = floor, 0
+        if self._waits >= self.limit:
+            return False
+        self._waits += 1
+        time.sleep(self.wait_s)
+        return True
+
+
 def _play_screen(
     client: ModClient,
     engine: EngineClient,
@@ -528,7 +561,10 @@ def _play_screen(
     runlog: RunLog,
     event_guard: EventLoopGuard | None = None,
     rewards: RewardClaimer | None = None,
+    patience: ScreenPatience | None = None,
 ) -> None:
+    if patience is not None and patience.wait(state):
+        return
     item = rewards.to_claim(state) if rewards is not None else None
     if item is not None:
         try:

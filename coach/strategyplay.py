@@ -94,6 +94,8 @@ def _execute(client: ModClient, state: dict, kind: str, option: dict) -> bool:
         return _take_card_reward(client, option)
     if kind in ("reward.potion", "reward.relic"):
         return _claim_reward(client, state, kind)
+    if kind in ("reward.potion_swap", "shop.potion_swap"):
+        return _swap_potion(client, state, kind, option)
     if kind == "reward.card":
         # A card a Thieving Hopper stole, offered back: `action` is the item's index.
         return _index_action(client, option, "claim_reward", "index")
@@ -207,6 +209,24 @@ def _claim_reward(client: ModClient, state: dict, kind: str) -> bool:
     if item is None or "index" not in item:
         return False
     return _post(client, {"action": "claim_reward", "index": item["index"]})
+
+
+def _swap_potion(client: ModClient, state: dict, kind: str, option: dict) -> bool:
+    """A potion taken over a full belt: throw away the held one the model named
+    (`discard`, the game's slug), then claim or buy the new one at `option["action"]`."""
+    index = option.get("action")
+    held = (state.get("player") or {}).get("potions") or []
+    slot = next(
+        (p.get("slot", i) for i, p in enumerate(held) if isinstance(p, dict) and p.get("id") == option.get("discard")),
+        None,
+    )
+    if slot is None or not isinstance(index, int) or isinstance(index, bool):
+        return False
+    if not _post(client, {"action": "discard_potion", "slot": slot}):
+        return False
+    if kind == "reward.potion_swap":
+        return _post(client, {"action": "claim_reward", "index": index})
+    return _post(client, {"action": "shop_purchase", "index": index})
 
 
 def _post(client: ModClient, action: dict) -> bool:

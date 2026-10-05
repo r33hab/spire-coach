@@ -678,3 +678,20 @@ def test_a_potion_is_taken_whenever_a_slot_is_free():
 
     assert RewardClaimer().to_claim(screen(held=1))["index"] == 0
     assert RewardClaimer().to_claim(screen(held=2)) is None
+
+
+def test_a_rest_site_waits_for_its_buttons_before_anyone_decides(monkeypatch):
+    # Live 2026-10-05: the options came before their buttons, the strategy saw none, and
+    # the fallback took the first enabled one on 3 of 5 rest sites.
+    from coach import autopilot
+
+    monkeypatch.setattr(autopilot.time, "sleep", lambda _s: None)
+    loading = {
+        "state_type": "rest_site",
+        "run": {"act": 1, "floor": 16},
+        "rest_site": {"options": [{"index": 0, "id": "HEAL", "is_enabled": True, "has_button": False}]},
+    }
+    ready = {**loading, "rest_site": {"options": [{"index": 0, "id": "HEAL", "is_enabled": True, "has_button": True}]}}
+    patience = autopilot.ScreenPatience(limit=3)
+    assert [patience.wait(loading) for _ in range(4)] == [True, True, True, False]
+    assert autopilot.ScreenPatience().wait(ready) is False
